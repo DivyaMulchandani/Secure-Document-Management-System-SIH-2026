@@ -34,7 +34,8 @@ async function seedDatabase() {
       delegated_access,
       documents,
       cases,
-      user_sessions
+      user_sessions,
+      ledger_blocks
     CASCADE;
   `);
     // Remove existing users, roles, and scopes so we start with ONLY the System Master Admin

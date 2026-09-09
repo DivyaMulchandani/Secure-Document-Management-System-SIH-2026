@@ -1,37 +1,32 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
+const express_rate_limit_1 = require("express-rate-limit");
 const auth_1 = require("../services/auth");
 const router = (0, express_1.Router)();
-// Rate limiting map for IP brute-force protection
-const loginAttempts = new Map();
-const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 mins
-const MAX_ATTEMPTS = 250;
-function checkRateLimit(ip) {
-    const now = Date.now();
-    const record = loginAttempts.get(ip);
-    if (!record) {
-        loginAttempts.set(ip, { count: 1, firstAttempt: now });
-        return true;
-    }
-    if (now - record.firstAttempt > RATE_LIMIT_WINDOW) {
-        loginAttempts.set(ip, { count: 1, firstAttempt: now });
-        return true;
-    }
-    record.count++;
-    return record.count <= MAX_ATTEMPTS;
-}
+const isProd = process.env.NODE_ENV === 'production';
+// Brute-force throttle: keyed by IP + username so an attacker cannot simply
+// rotate one of the two. Combined with the account-level lockout (5 failed
+// attempts -> 30 min) in services/auth.ts this gives layered protection.
+const loginLimiter = (0, express_rate_limit_1.rateLimit)({
+    windowMs: 15 * 60 * 1000,
+    limit: 15,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+        const uname = typeof req.body?.username === 'string' ? req.body.username.toLowerCase() : '';
+        return `${(0, express_rate_limit_1.ipKeyGenerator)(req.ip || '')}|${uname}`;
+    },
+    handler: (_req, res) => res.status(429).json({
+        error: 'Rate Limit Exceeded',
+        message: 'Too many authentication attempts for this identity/address. Please wait 15 minutes.',
+    }),
+});
 // POST /api/auth/login
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
     const ua = req.headers['user-agent'] || '';
     const { username, password } = req.body;
-    if (!checkRateLimit(ip)) {
-        return res.status(429).json({
-            error: 'Rate Limit Exceeded',
-            message: 'Too many authentication attempts from this IP. Please wait 15 minutes.',
-        });
-    }
     if (!username || !password) {
         return res.status(400).json({ error: 'Validation Error', message: 'Username and password are required' });
     }
@@ -40,24 +35,24 @@ router.post('/login', async (req, res) => {
         if (!result.success || !result.sessionToken || !result.user) {
             return res.status(result.code || 401).json({ error: 'Authentication Failed', message: result.error });
         }
-        loginAttempts.delete(ip);
-        // Set HTTP-Only Secure Cookie
+        // Session material is delivered ONLY as an HttpOnly cookie -- never in the
+        // response body (which would leak into dev tools, HAR captures and logs).
         res.cookie(auth_1.COOKIE_NAME, result.sessionToken, {
             httpOnly: true,
-            secure: false, // Set to true if HTTPS
-            sameSite: 'lax',
+            secure: isProd,
+            sameSite: 'strict',
             maxAge: 8 * 60 * 60 * 1000,
             path: '/',
         });
-        return res.json({
-            success: true,
-            token: result.sessionToken,
-            user: result.user,
-        });
+        return res.json({ success: true, user: result.user });
     }
     catch (err) {
-        console.error('Auth login caught error:', err);
-        return res.status(500).json({ error: 'Auth Error', detail: err.message, stack: err.stack });
+        // Do not leak internal error details (message/stack) to the client.
+        console.error('Auth login error:', err);
+        return res.status(500).json({
+            error: 'Authentication Error',
+            message: 'An internal error occurred during authentication. The event has been logged.',
+        });
     }
 });
 // POST /api/auth/logout

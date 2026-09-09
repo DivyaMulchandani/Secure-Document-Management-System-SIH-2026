@@ -315,7 +315,16 @@ async function handleCreateNode(req, res) {
     if (!authz.allowed) {
         return res.status(authz.statusCode).json({ error: 'Access Denied', message: authz.reason });
     }
-    const cleanCode = code.toUpperCase().replace(/\s+/g, '-');
+    // Strict whitelist: org codes become part of the materialised hierarchy_path
+    // which is later used to build subtree filters. Only [A-Z0-9-] is permitted so
+    // a code can never carry a quote or SQL metacharacter into a downstream query.
+    const cleanCode = String(code).toUpperCase().replace(/\s+/g, '-');
+    if (!/^[A-Z0-9-]{2,64}$/.test(cleanCode)) {
+        return res.status(400).json({
+            error: 'Validation Error',
+            message: 'Organization code must be 2-64 characters of A-Z, 0-9 and hyphens only.',
+        });
+    }
     const pathPart = cleanCode.toLowerCase().replace(/-/g, '_');
     const hierarchyPath = `${parent.hierarchy_path}.${pathPart}`;
     const level = parent.level + 1;

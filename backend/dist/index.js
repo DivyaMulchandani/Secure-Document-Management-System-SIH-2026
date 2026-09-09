@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const helmet_1 = __importDefault(require("helmet"));
+const express_rate_limit_1 = require("express-rate-limit");
 const path_1 = __importDefault(require("path"));
 const dotenv_1 = __importDefault(require("dotenv"));
 const db_1 = require("./services/db");
@@ -24,8 +25,19 @@ const delegations_1 = __importDefault(require("./routes/delegations"));
 const search_1 = __importDefault(require("./routes/search"));
 const audit_1 = __importDefault(require("./routes/audit"));
 const system_1 = __importDefault(require("./routes/system"));
+const ledger_1 = __importDefault(require("./routes/ledger"));
 const app = (0, express_1.default)();
 const PORT = parseInt(process.env.PORT || '5000', 10);
+const isProd = process.env.NODE_ENV === 'production';
+// Trust only the loopback proxy (Vite dev proxy / local reverse proxy) so that
+// req.ip reflects the real client and the rate limiters key correctly.
+app.set('trust proxy', 'loopback');
+// Explicit frontend origin allow-list -- never reflect an arbitrary Origin while
+// also sending credentials.
+const ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173,http://127.0.0.1:5173')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
 // Basic Cookie Parser Middleware
 app.use((req, res, next) => {
     const cookieHeader = req.headers.cookie;
@@ -41,20 +53,52 @@ app.use((req, res, next) => {
     }
     next();
 });
-// Security Headers
+// Security Headers -- real CSP baseline instead of disabling it.
 app.use((0, helmet_1.default)({
-    contentSecurityPolicy: false,
+    contentSecurityPolicy: {
+        useDefaults: true,
+        directives: {
+            'default-src': ["'self'"],
+            'script-src': ["'self'"],
+            'style-src': ["'self'", "'unsafe-inline'"], // Tailwind injects inline styles
+            'img-src': ["'self'", 'data:'],
+            'connect-src': ["'self'"],
+            'object-src': ["'none'"],
+            'frame-ancestors': ["'none'"],
+            'base-uri': ["'self'"],
+            'form-action': ["'self'"],
+            ...(isProd ? { 'upgrade-insecure-requests': [] } : {}),
+        },
+    },
     crossOriginEmbedderPolicy: false,
+    hsts: isProd ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false,
+    referrerPolicy: { policy: 'no-referrer' },
 }));
-// CORS Configuration
+// CORS -- explicit allow-list only.
 app.use((0, cors_1.default)({
-    origin: true, // Allow frontend dev origin
+    origin(origin, callback) {
+        // Non-browser clients / same-origin requests send no Origin header.
+        if (!origin || ALLOWED_ORIGINS.includes(origin))
+            return callback(null, true);
+        return callback(new Error('Origin not allowed by CORS policy'));
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 }));
 app.use(express_1.default.json({ limit: '10mb' }));
 app.use(express_1.default.urlencoded({ extended: true, limit: '10mb' }));
+// Global API rate limiter (auth endpoints have their own stricter limiter).
+app.use('/api', (0, express_rate_limit_1.rateLimit)({
+    windowMs: 60 * 1000,
+    limit: 300,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    handler: (_req, res) => res.status(429).json({
+        error: 'Rate Limit Exceeded',
+        message: 'Too many requests. Please slow down.',
+    }),
+}));
 // Health Check
 app.get('/api/health', (req, res) => {
     res.json({ status: 'HEALTHY', timestamp: new Date().toISOString() });
@@ -79,6 +123,7 @@ app.use('/api/delegations', delegations_1.default);
 app.use('/api/search', search_1.default);
 app.use('/api/audit', audit_1.default);
 app.use('/api/system', system_1.default);
+app.use('/api/ledger', ledger_1.default);
 // Global Error Handler (Sanitizes internal server details)
 app.use((err, req, res, next) => {
     console.error('Unhandled API Error:', err);

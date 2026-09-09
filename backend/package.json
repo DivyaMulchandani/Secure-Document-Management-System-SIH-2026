@@ -9,7 +9,8 @@
     "start": "node dist/index.js",
     "seed": "tsx src/services/seed.ts",
     "test:security": "tsx ../tests/security.test.ts",
-    "test:milestone1": "tsx ../tests/milestone1.test.ts"
+    "test:milestone1": "tsx ../tests/milestone1.test.ts",
+    "test:ledger": "tsx ../tests/ledger.test.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

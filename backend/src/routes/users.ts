@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
-import { query } from '../services/db';
+import { query, withTransaction } from '../services/db';
 import { requireAuth } from '../services/auth';
 import { authorize } from '../services/authorization';
 
@@ -56,7 +56,15 @@ router.get('/hierarchy-summary', requireAuth, async (req: Request, res: Response
   const user = req.userSession!;
 
   const isMaster = user.roleId === 'MASTER_ADMIN' || user.roleId === 'SYSTEM_MASTER_ADMIN';
-  const orgFilter = isMaster ? '1=1' : `(o.hierarchy_path = '${user.organizationPath}' OR o.hierarchy_path LIKE '${user.organizationPath}.%')`;
+
+  // Parameterised subtree filter -- never interpolate identity-derived values
+  // (organizationPath originates from an org "code" field) into SQL text.
+  const params: any[] = [];
+  let orgFilter = '1=1';
+  if (!isMaster) {
+    params.push(user.organizationPath);
+    orgFilter = `(o.hierarchy_path = $1 OR o.hierarchy_path LIKE $1 || '.%')`;
+  }
 
   const summaryRes = await query(`
     SELECT o.id, o.name, o.code, o.agency_branch, o.level, o.parent_id, o.hierarchy_path, o.body_id,
@@ -67,7 +75,7 @@ router.get('/hierarchy-summary', requireAuth, async (req: Request, res: Response
     WHERE ${orgFilter}
     GROUP BY o.id, o.name, o.code, o.agency_branch, o.level, o.parent_id, o.hierarchy_path, o.body_id
     ORDER BY o.agency_branch ASC, o.level ASC, o.name ASC;
-  `);
+  `, params);
 
   return res.json({ summary: summaryRes.rows });
 });
@@ -209,51 +217,53 @@ router.post('/body-admin', requireAuth, async (req: Request, res: Response) => {
   const rootOrg = rootOrgRes.rows[0];
 
   try {
-    const passwordHash = await bcrypt.hash(password, 10);
-    const newAdmin = await query(`
-      INSERT INTO users (
-        username, email, display_name, badge_number, phone_number,
-        designation, department_wing, clearance_level, is_layer_admin,
-        password_hash, primary_role_id, primary_organization_id
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 'TOP_SECRET', TRUE, $8, $9, $10)
-      RETURNING id, username, email, display_name, badge_number, phone_number,
-                designation, department_wing, clearance_level, is_layer_admin,
-                status, primary_role_id, primary_organization_id, created_at;
-    `, [
-      username, email, displayName, badgeNumber || null, phoneNumber || null,
-      designation || `${branch} Sovereign Body Administrator`, departmentWing || `${branch} Executive Command`,
-      passwordHash, defaultRole, rootOrg.id
-    ]);
+    const passwordHash = await bcrypt.hash(password, 12);
+    const createdAdmin = await withTransaction(async (tx) => {
+      const newAdmin = await tx.query(`
+        INSERT INTO users (
+          username, email, display_name, badge_number, phone_number,
+          designation, department_wing, clearance_level, is_layer_admin,
+          password_hash, primary_role_id, primary_organization_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'TOP_SECRET', TRUE, $8, $9, $10)
+        RETURNING id, username, email, display_name, badge_number, phone_number,
+                  designation, department_wing, clearance_level, is_layer_admin,
+                  status, primary_role_id, primary_organization_id, created_at;
+      `, [
+        username, email, displayName, badgeNumber || null, phoneNumber || null,
+        designation || `${branch} Sovereign Body Administrator`, departmentWing || `${branch} Executive Command`,
+        passwordHash, defaultRole, rootOrg.id
+      ]);
 
-    const newAdminId = newAdmin.rows[0].id;
+      const newAdminId = newAdmin.rows[0].id;
 
-    // Insert user_roles
-    await query(`
-      INSERT INTO user_roles (user_id, role_id)
-      VALUES ($1, $2), ($1, 'BODY_ADMIN')
-      ON CONFLICT DO NOTHING;
-    `, [newAdminId, defaultRole]);
+      await tx.query(`
+        INSERT INTO user_roles (user_id, role_id)
+        VALUES ($1, $2), ($1, 'BODY_ADMIN')
+        ON CONFLICT DO NOTHING;
+      `, [newAdminId, defaultRole]);
 
-    // Insert admin_scopes for body admin with SUBTREE reach
-    await query(`
-      INSERT INTO admin_scopes (user_id, organization_node_id, scope_type)
-      VALUES ($1, $2, 'SUBTREE')
-      ON CONFLICT DO NOTHING;
-    `, [newAdminId, rootOrg.id]);
+      await tx.query(`
+        INSERT INTO admin_scopes (user_id, organization_node_id, scope_type)
+        VALUES ($1, $2, 'SUBTREE')
+        ON CONFLICT DO NOTHING;
+      `, [newAdminId, rootOrg.id]);
 
-    await query(`
-      INSERT INTO audit_logs (
-        user_id, actor_user_id, organization_id, organization_node_id, body_id,
-        action, resource_type, resource_id, result, ip_address, user_agent, metadata, after_value
-      )
-      VALUES ($1, $1, $2, $2, $3, 'ADMIN_CREATED', 'USER', $4, 'ALLOW', $5, $6, $7::jsonb, $7::jsonb);
-    `, [
-      user.userId, rootOrg.id, bodyId, newAdminId, req.ip, req.headers['user-agent'],
-      JSON.stringify({ username, bodyId, role: defaultRole, orgCode: rootCode, action: 'BODY_ADMIN_PROVISIONED' })
-    ]);
+      await tx.query(`
+        INSERT INTO audit_logs (
+          user_id, actor_user_id, organization_id, organization_node_id, body_id,
+          action, resource_type, resource_id, result, ip_address, user_agent, metadata, after_value
+        )
+        VALUES ($1, $1, $2, $2, $3, 'ADMIN_CREATED', 'USER', $4, 'ALLOW', $5, $6, $7::jsonb, $7::jsonb);
+      `, [
+        user.userId, rootOrg.id, bodyId, newAdminId, req.ip, req.headers['user-agent'],
+        JSON.stringify({ username, bodyId, role: defaultRole, orgCode: rootCode, action: 'BODY_ADMIN_PROVISIONED' })
+      ]);
 
-    return res.status(201).json({ success: true, user: newAdmin.rows[0] });
+      return newAdmin.rows[0];
+    });
+
+    return res.status(201).json({ success: true, user: createdAdmin });
   } catch (err: any) {
     if (err.code === '23505') {
       return res.status(409).json({ error: 'Conflict', message: 'Username or email is already registered' });
@@ -365,6 +375,25 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
         message: 'Only a Master Administrator may provision another Master Administrator.',
       });
     }
+
+    // 5. Role-permission subset rule (SECURITY.md 3.2): the assigned role's
+    //    permission set must be a strict subset of the creating actor's own.
+    const targetPermsRes = await query(
+      `SELECT permission_id FROM role_permissions WHERE role_id = $1;`,
+      [roleId]
+    );
+    const actorPerms = new Set(user.permissions);
+    const escalated = targetPermsRes.rows
+      .map((r) => r.permission_id)
+      .filter((p) => !actorPerms.has(p));
+    if (escalated.length > 0) {
+      await logDecision(user, 'ACCESS_DENIED', organizationId,
+        `Role '${roleId}' grants permissions the creator lacks: ${escalated.join(', ')}`, req);
+      return res.status(403).json({
+        error: 'Privilege Escalation Blocked',
+        message: `You cannot assign role '${roleId}': it carries permissions you do not hold (${escalated.join(', ')}).`,
+      });
+    }
   }
 
   // Base permission check
@@ -379,56 +408,58 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
 
   try {
     const isNewUserAdmin = !!isLayerAdmin || roleId.includes('ADMIN');
-    const passwordHash = await bcrypt.hash(password, 10);
-    const newU = await query(`
-      INSERT INTO users (
-        username, email, display_name, badge_number, phone_number,
-        designation, department_wing, clearance_level, is_layer_admin,
-        password_hash, primary_role_id, primary_organization_id
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-      RETURNING id, username, email, display_name, badge_number, phone_number,
-                designation, department_wing, clearance_level, is_layer_admin,
-                status, primary_role_id, primary_organization_id, created_at;
-    `, [
-      username, email, displayName, badgeNumber || null, phoneNumber || null,
-      designation || null, departmentWing || null, clearanceLevel || 'CONFIDENTIAL', isNewUserAdmin,
-      passwordHash, roleId, organizationId
-    ]);
+    const passwordHash = await bcrypt.hash(password, 12);
+    const createdUser = await withTransaction(async (tx) => {
+      const newU = await tx.query(`
+        INSERT INTO users (
+          username, email, display_name, badge_number, phone_number,
+          designation, department_wing, clearance_level, is_layer_admin,
+          password_hash, primary_role_id, primary_organization_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        RETURNING id, username, email, display_name, badge_number, phone_number,
+                  designation, department_wing, clearance_level, is_layer_admin,
+                  status, primary_role_id, primary_organization_id, created_at;
+      `, [
+        username, email, displayName, badgeNumber || null, phoneNumber || null,
+        designation || null, departmentWing || null, clearanceLevel || 'CONFIDENTIAL', isNewUserAdmin,
+        passwordHash, roleId, organizationId
+      ]);
 
-    const newUserId = newU.rows[0].id;
+      const newUserId = newU.rows[0].id;
 
-    // Insert user_roles
-    await query(`
-      INSERT INTO user_roles (user_id, role_id)
-      VALUES ($1, $2)
-      ON CONFLICT DO NOTHING;
-    `, [newUserId, roleId]);
-
-    // Insert admin_scopes if user is an admin
-    if (isNewUserAdmin) {
-      await query(`
-        INSERT INTO admin_scopes (user_id, organization_node_id, scope_type)
-        VALUES ($1, $2, 'SUBTREE')
+      await tx.query(`
+        INSERT INTO user_roles (user_id, role_id)
+        VALUES ($1, $2)
         ON CONFLICT DO NOTHING;
-      `, [newUserId, organizationId]);
-    }
+      `, [newUserId, roleId]);
 
-    const auditAction = isNewUserAdmin ? 'ADMIN_CREATED' : 'USER_CREATED';
+      if (isNewUserAdmin) {
+        await tx.query(`
+          INSERT INTO admin_scopes (user_id, organization_node_id, scope_type)
+          VALUES ($1, $2, 'SUBTREE')
+          ON CONFLICT DO NOTHING;
+        `, [newUserId, organizationId]);
+      }
 
-    await query(`
-      INSERT INTO audit_logs (
-        user_id, actor_user_id, organization_id, organization_node_id, body_id,
-        action, resource_type, resource_id, result, ip_address, user_agent, metadata, after_value
-      )
-      VALUES ($1, $1, $2, $2, $3, $4, 'USER', $5, 'ALLOW', $6, $7, $8::jsonb, $8::jsonb);
-    `, [
-      user.userId, organizationId, targetOrg.body_id || targetOrg.agency_branch,
-      auditAction, newUserId, req.ip, req.headers['user-agent'],
-      JSON.stringify({ username, role: roleId, org: organizationId, is_layer_admin: isNewUserAdmin })
-    ]);
+      const auditAction = isNewUserAdmin ? 'ADMIN_CREATED' : 'USER_CREATED';
 
-    return res.status(201).json({ success: true, user: newU.rows[0] });
+      await tx.query(`
+        INSERT INTO audit_logs (
+          user_id, actor_user_id, organization_id, organization_node_id, body_id,
+          action, resource_type, resource_id, result, ip_address, user_agent, metadata, after_value
+        )
+        VALUES ($1, $1, $2, $2, $3, $4, 'USER', $5, 'ALLOW', $6, $7, $8::jsonb, $8::jsonb);
+      `, [
+        user.userId, organizationId, targetOrg.body_id || targetOrg.agency_branch,
+        auditAction, newUserId, req.ip, req.headers['user-agent'],
+        JSON.stringify({ username, role: roleId, org: organizationId, is_layer_admin: isNewUserAdmin })
+      ]);
+
+      return newU.rows[0];
+    });
+
+    return res.status(201).json({ success: true, user: createdUser });
   } catch (err: any) {
     if (err.code === '23505') {
       return res.status(409).json({ error: 'Conflict', message: 'Username or email is already registered' });

@@ -11,6 +11,26 @@ export const Audit: React.FC = () => {
   const [resultFilter, setResultFilter] = useState('');
   const [selectedLog, setSelectedLog] = useState<any>(null);
 
+  const [ledger, setLedger] = useState<any>(null);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+
+  const verifyLedger = async () => {
+    setLedgerLoading(true);
+    try {
+      const res = await api.get<any>('/ledger/verify');
+      setLedger(res);
+    } catch (err) {
+      console.error(err);
+      setLedger({ valid: false, reason: 'Verification request failed' });
+    } finally {
+      setLedgerLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    verifyLedger();
+  }, []);
+
   const fetchAuditLogs = async () => {
     setLoading(true);
     try {
@@ -48,6 +68,41 @@ export const Audit: React.FC = () => {
           <span className="w-2 h-2 rounded-full bg-accent animate-ping" />
           <span>Synchronous ACID Logging Active</span>
         </span>
+      </div>
+
+      {/* Hash-Chained Ledger Integrity */}
+      <div className={`glass-card p-4 border ${
+        ledger == null ? 'border-border'
+          : ledger.valid ? 'border-success/40' : 'border-danger/50'
+      }`}>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <div className="text-xs font-bold text-primary-text flex items-center gap-2">
+              <span>🔗 Cryptographic Ledger Integrity</span>
+              {ledger != null && (
+                <span className={`px-2 py-0.5 rounded text-[10px] font-mono ${
+                  ledger.valid
+                    ? 'bg-success-light text-success border border-success/30'
+                    : 'bg-danger-light text-danger border border-danger/30'
+                }`}>
+                  {ledger.valid ? 'CHAIN INTACT ✓' : 'CHAIN BROKEN ✗'}
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] text-muted-text font-mono mt-1">
+              {ledgerLoading
+                ? 'Recomputing SHA-256 chain and verifying Ed25519 body signatures…'
+                : ledger == null
+                  ? 'Not yet verified.'
+                  : ledger.valid
+                    ? `${ledger.totalBlocks} blocks verified • ${ledger.checkedSignatures} agency signatures checked • ${new Date(ledger.verifiedAt).toLocaleTimeString()}`
+                    : `Tamper detected at block #${ledger.brokenAt ?? '?'} — ${ledger.reason}`}
+            </p>
+          </div>
+          <button onClick={verifyLedger} disabled={ledgerLoading} className="btn-secondary text-xs self-start sm:self-auto">
+            <span>{ledgerLoading ? 'Verifying…' : 'Re-verify Chain'}</span>
+          </button>
+        </div>
       </div>
 
       {/* Filter Bar */}

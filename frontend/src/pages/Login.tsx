@@ -7,8 +7,8 @@ export const Login: React.FC = () => {
   const { login } = useAuth();
   const navigate = useNavigate();
 
-  const [username, setUsername] = useState('master_admin');
-  const [password, setPassword] = useState('Gov@Secure2026!');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -25,12 +25,6 @@ export const Login: React.FC = () => {
     } else {
       setError(res.error || 'Authentication Failed');
     }
-  };
-
-  const handleFillMasterAdmin = () => {
-    setUsername('master_admin');
-    setPassword('Gov@Secure2026!');
-    setError('');
   };
 
   return (
@@ -112,28 +106,17 @@ export const Login: React.FC = () => {
           </div>
         </div>
 
-        {/* System Initial Bootstrap Guidance */}
+        {/* System Governance Guidance */}
         <div className="mt-6 glass-card p-4 border border-border">
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-xs font-bold text-accent flex items-center gap-1.5">
-              <span>🏛️ System Bootstrap & Sovereign Governance</span>
-            </div>
-            <button
-              type="button"
-              onClick={handleFillMasterAdmin}
-              className="text-[10px] px-2 py-0.5 rounded bg-accent/15 text-accent hover:bg-accent/25 border border-accent/30 font-mono transition-colors"
-            >
-              Fill Master Admin
-            </button>
+          <div className="text-xs font-bold text-accent flex items-center gap-1.5 mb-2">
+            <span>🏛️ Sovereign Governance Model</span>
           </div>
           <p className="text-[11px] text-muted-text leading-relaxed">
-            Per institutional governance standards, the database initializes with exactly <strong>one</strong> Apex Administrator: <code className="text-primary-text font-mono">master_admin</code>.
+            Access is provisioned top-down: the Apex Administrator provisions Sovereign Body
+            Administrators for Police, Judiciary &amp; Forensics, who in turn provision layer
+            personnel strictly within their own descendant subtree. Credentials are issued
+            out-of-band &mdash; contact your provisioning administrator.
           </p>
-          <div className="mt-2 text-[10.5px] text-muted-darker bg-surface p-2.5 rounded border border-border font-mono space-y-1">
-            <div>1. Login as Master Admin (<span className="text-emerald-400">Gov@Secure2026!</span>)</div>
-            <div>2. Provision Sovereign Body Admins for Police, Judiciary & Forensics</div>
-            <div>3. Body Admins log in independently to provision layer personnel</div>
-          </div>
         </div>
       </div>
     </div>

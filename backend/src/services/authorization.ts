@@ -1,4 +1,5 @@
-import { query } from './db';
+import { query, withTransaction } from './db';
+import { appendLedgerBlock } from './ledger';
 import { UserSessionPayload } from './auth';
 
 export interface ResourceTarget {
@@ -231,14 +232,38 @@ async function logDecision(
   ua: string
 ) {
   try {
-    await query(`
-      INSERT INTO audit_logs (
-        user_id, actor_user_id, organization_id, organization_node_id, body_id,
-        action, resource_type, resource_id, case_id, result, ip_address, user_agent, after_value, metadata
-      )
-      VALUES ($1, $1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, json_build_object('reason', $11::text), json_build_object('reason', $11::text));
-    `, [user.userId, user.organizationId, user.bodyId || user.agencyBranch, action, resource.type, resource.id || null, resource.caseId || null, result, ip, ua, reason]);
+    await withTransaction(async (tx) => {
+      const auditRes = await tx.query(`
+        INSERT INTO audit_logs (
+          user_id, actor_user_id, organization_id, organization_node_id, body_id,
+          action, resource_type, resource_id, case_id, result, ip_address, user_agent, after_value, metadata
+        )
+        VALUES ($1, $1, $2, $2, $3, $4, $5, $6, $7, $8, $9, $10, json_build_object('reason', $11::text), json_build_object('reason', $11::text))
+        RETURNING id;
+      `, [user.userId, user.organizationId, user.bodyId || user.agencyBranch, action, resource.type, resource.id || null, resource.caseId || null, result, ip, ua, reason]);
+
+      // Anchor the authorization decision on the tamper-evident ledger so the
+      // audit trail's integrity is verifiable independently of DB permissions.
+      await appendLedgerBlock(tx, {
+        eventType: 'AUDIT_DECISION',
+        refTable: 'audit_logs',
+        refId: auditRes.rows[0].id,
+        caseId: resource.caseId || null,
+        orgId: user.organizationId,
+        bodyId: user.bodyId || user.agencyBranch,
+        payload: {
+          actorId: user.userId,
+          action,
+          resourceType: resource.type,
+          resourceId: resource.id || null,
+          caseId: resource.caseId || null,
+          result,
+          reason,
+          ip,
+        },
+      });
+    });
   } catch (err) {
-    console.error('Audit log failed:', err);
+    console.error('Audit log / ledger append failed:', err);
   }
 }

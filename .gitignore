@@ -1,0 +1,25 @@
+# Secrets & environment
+.env
+.env.*
+!.env.example
+
+# Cryptographic material (body signing keys) -- never commit; use a KMS in prod
+data/keys/
+*.pem
+
+# Runtime data
+data/documents/vault/
+data/logs/
+*.log
+
+# Dependencies & build output
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+Thumbs.db

@@ -1,7 +1,8 @@
 import { Router, Request, Response } from 'express';
-import { query } from '../services/db';
+import { query, withTransaction } from '../services/db';
 import { requireAuth } from '../services/auth';
 import { authorize } from '../services/authorization';
+import { appendLedgerBlock } from '../services/ledger';
 
 const router = Router();
 
@@ -23,7 +24,7 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
     LEFT JOIN delegated_access da ON c.id = da.case_id AND da.granted_to_user_id = $1 AND da.status = 'ACTIVE' AND NOW() BETWEEN da.starts_at AND da.expires_at
     WHERE (
       -- Master Admin has visibility
-      $2 = 'MASTER_ADMIN'
+      $2 IN ('MASTER_ADMIN', 'SYSTEM_MASTER_ADMIN')
       -- Originating agency in user's vertical subtree
       OR o.hierarchy_path = $3 OR o.hierarchy_path LIKE $3 || '.%'
       -- Cross-agency participation grant
@@ -130,56 +131,79 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
   }
 
   try {
-    // 3. Create Case Record
-    const caseRes = await query(`
-      INSERT INTO cases (
-        fir_number, case_type, legacy_fir_number, year, originating_organization_id,
-        lead_investigator_id, title, description, incident_date, incident_location,
-        status, is_legacy, created_by
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'UNDER_INVESTIGATION', $11, $12
-      ) RETURNING *;
-    `, [
-      officialFirNumber, caseType || 'NEW_FIR', legacyFirNumber || null, year,
-      targetOrgId, leadInvestigatorId || user.userId, title, description || '',
-      incidentDate || new Date(), incidentLocation || '', isLegacy, user.userId
-    ]);
+    // Steps 3-7 (+ ledger anchor) commit atomically: a case can never exist
+    // without its FIR, participation, timeline, audit and ledger records.
+    const createdCase = await withTransaction(async (tx) => {
+      // 3. Create Case Record
+      const caseRes = await tx.query(`
+        INSERT INTO cases (
+          fir_number, case_type, legacy_fir_number, year, originating_organization_id,
+          lead_investigator_id, title, description, incident_date, incident_location,
+          status, is_legacy, created_by
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'UNDER_INVESTIGATION', $11, $12
+        ) RETURNING *;
+      `, [
+        officialFirNumber, caseType || 'NEW_FIR', legacyFirNumber || null, year,
+        targetOrgId, leadInvestigatorId || user.userId, title, description || '',
+        incidentDate || new Date(), incidentLocation || '', isLegacy, user.userId
+      ]);
 
-    const createdCase = caseRes.rows[0];
+      const created = caseRes.rows[0];
 
-    // 4. Initial Case Agency Participation (Originating Unit)
-    await query(`
-      INSERT INTO case_agency_participation (case_id, organization_id, agency_branch, access_role)
-      VALUES ($1, $2, $3, 'ORIGINATING_AGENCY');
-    `, [createdCase.id, targetOrgId, user.agencyBranch]);
+      // 4. Initial Case Agency Participation (Originating Unit)
+      await tx.query(`
+        INSERT INTO case_agency_participation (case_id, organization_id, agency_branch, access_role)
+        VALUES ($1, $2, $3, 'ORIGINATING_AGENCY');
+      `, [created.id, targetOrgId, user.agencyBranch]);
 
-    // 5. Insert FIR Record
-    await query(`
-      INSERT INTO firs (
-        case_id, registration_date, complainant_name, complainant_contact, complainant_address,
-        acts_and_sections, general_diary_reference, fir_content
-      ) VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7);
-    `, [
-      createdCase.id,
-      firData.complainantName,
-      firData.complainantContact || '',
-      firData.complainantAddress || '',
-      JSON.stringify(firData.actsAndSections || [{ act: 'Bharatiya Nyaya Sanhita, 2023', sections: ['General Cognizance'] }]),
-      firData.generalDiaryReference || '',
-      firData.firContent
-    ]);
+      // 5. Insert FIR Record
+      await tx.query(`
+        INSERT INTO firs (
+          case_id, registration_date, complainant_name, complainant_contact, complainant_address,
+          acts_and_sections, general_diary_reference, fir_content
+        ) VALUES ($1, NOW(), $2, $3, $4, $5, $6, $7);
+      `, [
+        created.id,
+        firData.complainantName,
+        firData.complainantContact || '',
+        firData.complainantAddress || '',
+        JSON.stringify(firData.actsAndSections || [{ act: 'Bharatiya Nyaya Sanhita, 2023', sections: ['General Cognizance'] }]),
+        firData.generalDiaryReference || '',
+        firData.firContent
+      ]);
 
-    // 6. Record in Case Timeline
-    await query(`
-      INSERT INTO case_timeline (case_id, event_type, title, description, actor_id, organization_id, entity_type, entity_id)
-      VALUES ($1, 'CASE_CREATED', 'FIR Registered & Case Workspace Initialized', $2, $3, $4, 'CASE', $1);
-    `, [createdCase.id, `FIR ${officialFirNumber} registered by ${user.displayName}`, user.userId, targetOrgId]);
+      // 6. Record in Case Timeline
+      await tx.query(`
+        INSERT INTO case_timeline (case_id, event_type, title, description, actor_id, organization_id, entity_type, entity_id)
+        VALUES ($1, 'CASE_CREATED', 'FIR Registered & Case Workspace Initialized', $2, $3, $4, 'CASE', $1);
+      `, [created.id, `FIR ${officialFirNumber} registered by ${user.displayName}`, user.userId, targetOrgId]);
 
-    // 7. Audit Log
-    await query(`
-      INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, case_id, result, ip_address, user_agent, after_value)
-      VALUES ($1, $2, 'CASE_CREATED', 'CASE', $3, $4, 'ALLOW', $5, $6, $7::jsonb);
-    `, [user.userId, targetOrgId, createdCase.id, createdCase.id, req.ip, req.headers['user-agent'], JSON.stringify({ fir: officialFirNumber, type: caseType })]);
+      // 7. Audit Log
+      await tx.query(`
+        INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, case_id, result, ip_address, user_agent, after_value)
+        VALUES ($1, $2, 'CASE_CREATED', 'CASE', $3, $4, 'ALLOW', $5, $6, $7::jsonb);
+      `, [user.userId, targetOrgId, created.id, created.id, req.ip, req.headers['user-agent'], JSON.stringify({ fir: officialFirNumber, type: caseType })]);
+
+      // 8. Anchor an integrity-ledger block for this registration.
+      await appendLedgerBlock(tx, {
+        eventType: 'CASE_CREATED',
+        refTable: 'cases',
+        refId: created.id,
+        caseId: created.id,
+        orgId: targetOrgId,
+        bodyId: user.bodyId || user.agencyBranch,
+        payload: {
+          firNumber: officialFirNumber,
+          caseType: caseType || 'NEW_FIR',
+          originatingOrgId: targetOrgId,
+          createdBy: user.userId,
+          year,
+        },
+      });
+
+      return created;
+    });
 
     return res.status(201).json({ success: true, case: createdCase });
   } catch (err: any) {

@@ -1,18 +1,32 @@
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import path from 'path';
 import dotenv from 'dotenv';
 
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+// Project-root .env (backend/src/services -> ../../../.env, and the same from
+// backend/dist/services after compilation). Loading it here as well as in
+// index.ts means standalone scripts (seed, tests) that import this module
+// directly still get the real configuration.
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
+// Fail fast rather than fall back to a hardcoded credential. A missing DB
+// password in any environment is a deployment error, not something to paper over.
+if (!process.env.DB_PASSWORD) {
+  throw new Error(
+    'DB_PASSWORD is not set. Refusing to start with an implicit/blank database credential. ' +
+    'Set DB_PASSWORD in the environment (see .env.example).'
+  );
+}
 
 export const pool = new Pool({
   host: process.env.DB_HOST || '127.0.0.1',
   port: parseInt(process.env.DB_PORT || '5432', 10),
   database: process.env.DB_NAME || 'casevault',
   user: process.env.DB_USER || 'casevault',
-  password: process.env.DB_PASSWORD || 't0rr3rdbmz7!P9xw',
+  password: process.env.DB_PASSWORD,
   max: 25,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
 });
 
 export async function query(text: string, params?: any[]) {
@@ -20,6 +34,34 @@ export async function query(text: string, params?: any[]) {
   try {
     await client.query('SET search_path TO investigation, public;');
     return await client.query(text, params);
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Runs `fn` inside a single database transaction. The callback receives a
+ * transaction-scoped client whose `.query()` participates in the transaction;
+ * any thrown error triggers ROLLBACK, otherwise COMMIT. Use this for every
+ * multi-statement workflow (case + FIR + timeline + audit, evidence custody
+ * transfer, user provisioning, document storage) so a partial failure can
+ * never leave an evidentiary record without its audit/ledger entry.
+ */
+export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('SET search_path TO investigation, public;');
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      /* connection already broken; pool will discard it */
+    }
+    throw err;
   } finally {
     client.release();
   }
@@ -540,6 +582,47 @@ export async function initDatabase(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_audit_case ON audit_logs(case_id);
       CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);
       CREATE INDEX IF NOT EXISTS idx_audit_result ON audit_logs(result);
+
+      -- 24b. Cryptographic Hash-Chained Ledger (tamper-evidence for audit + chain-of-custody)
+      -- Stores ONLY hashes, identifiers and organisational signatures -- never PII or payloads.
+      CREATE TABLE IF NOT EXISTS ledger_blocks (
+        id BIGSERIAL PRIMARY KEY,
+        seq BIGINT NOT NULL UNIQUE,              -- monotonic sequence; gaps/reorders are detectable
+        prev_hash CHAR(64) NOT NULL,
+        event_type VARCHAR(64) NOT NULL,         -- e.g. AUDIT_DECISION, EVIDENCE_CUSTODY, DOCUMENT_ANCHOR, CASE_CREATED
+        event_ref_table VARCHAR(64),             -- source table the block anchors
+        event_ref_id VARCHAR(128),               -- source row id
+        case_id UUID,
+        org_id UUID,                             -- originating organisation (agency identity)
+        body_id VARCHAR(32),                     -- POLICE / JUDICIARY / FORENSICS / MASTER
+        payload_hash CHAR(64) NOT NULL,          -- sha256(canonical_json(event_data))
+        org_signature TEXT,                      -- Ed25519 signature over block_hash by the originating body key
+        block_hash CHAR(64) NOT NULL,            -- sha256(prev_hash + payload_hash + seq + created_at_iso)
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ledger_seq ON ledger_blocks(seq);
+      CREATE INDEX IF NOT EXISTS idx_ledger_ref ON ledger_blocks(event_ref_table, event_ref_id);
+      CREATE INDEX IF NOT EXISTS idx_ledger_case ON ledger_blocks(case_id);
+
+      -- Append-only enforcement at the DATABASE level for the ledger: even a direct
+      -- UPDATE/DELETE with the app's own role (or a mistaken query) is rejected.
+      -- This is the database-permission-independent tamper barrier: the ledger
+      -- anchors every audit row, so audit-trail tampering is cryptographically
+      -- detectable via /api/ledger/verify regardless of audit_logs table grants.
+      -- (audit_logs itself keeps its ON DELETE SET NULL FKs for re-seed/reset;
+      --  production immutability there is a least-privilege runtime role -- see SECURITY.md.)
+      CREATE OR REPLACE FUNCTION investigation.reject_mutation() RETURNS trigger AS $reject$
+      BEGIN
+        RAISE EXCEPTION 'append-only table: % on % is not permitted', TG_OP, TG_TABLE_NAME
+          USING ERRCODE = 'insufficient_privilege';
+      END;
+      $reject$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS trg_ledger_blocks_append_only ON ledger_blocks;
+      CREATE TRIGGER trg_ledger_blocks_append_only
+        BEFORE UPDATE OR DELETE ON ledger_blocks
+        FOR EACH ROW EXECUTE FUNCTION investigation.reject_mutation();
 
       -- 25. System Settings
       CREATE TABLE IF NOT EXISTS system_settings (

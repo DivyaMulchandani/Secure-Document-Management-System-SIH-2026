@@ -31,7 +31,8 @@ export async function seedDatabase(): Promise<void> {
       delegated_access,
       documents,
       cases,
-      user_sessions
+      user_sessions,
+      ledger_blocks
     CASCADE;
   `);
 

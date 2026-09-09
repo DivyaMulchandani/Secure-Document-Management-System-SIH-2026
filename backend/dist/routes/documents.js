@@ -61,8 +61,13 @@ router.post('/cases/:id/documents', auth_1.requireAuth, upload.single('file'), a
     if (!authz.allowed) {
         return res.status(authz.statusCode).json({ error: 'Access Denied', message: authz.reason });
     }
+    // Content-signature + AV validation BEFORE anything touches disk or the DB.
+    const validation = await (0, documents_1.validateUpload)(file.buffer, file.originalname);
+    if (!validation.ok) {
+        return res.status(422).json({ error: 'Rejected Upload', message: validation.reason });
+    }
     try {
-        const doc = await (0, documents_1.storeDocument)(caseId, title, category, classification || 'CONFIDENTIAL', file.buffer, file.originalname, file.mimetype || 'application/octet-stream', user, req.ip || '127.0.0.1', req.headers['user-agent'] || '');
+        const doc = await (0, documents_1.storeDocument)(caseId, title, category, classification || 'CONFIDENTIAL', file.buffer, file.originalname, validation.detectedType || 'application/octet-stream', user, req.ip || '127.0.0.1', req.headers['user-agent'] || '');
         return res.status(201).json({ success: true, document: doc });
     }
     catch (err) {
@@ -78,7 +83,7 @@ router.get('/:id/download', auth_1.requireAuth, async (req, res) => {
     if (!docData) {
         return res.status(404).json({ error: 'Not Found', message: 'Document not found or inaccessible' });
     }
-    const { metadata, stream } = docData;
+    const { metadata, stream, integrityOk, actualHash } = docData;
     const authz = await (0, authorization_1.authorize)(user, 'DOCUMENT_DOWNLOAD', {
         type: 'DOCUMENT',
         id: documentId,
@@ -88,6 +93,19 @@ router.get('/:id/download', auth_1.requireAuth, async (req, res) => {
     if (!authz.allowed) {
         return res.status(authz.statusCode).json({ error: 'Access Denied', message: authz.reason });
     }
+    // Integrity gate: refuse to serve a vault file whose on-disk bytes no longer
+    // match the SHA-256 recorded at upload. The attempt is audited as FAILED.
+    if (!integrityOk) {
+        await (0, db_1.query)(`
+      INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, case_id, result, ip_address, user_agent, after_value)
+      VALUES ($1, $2, 'DOCUMENT_INTEGRITY_FAILURE', 'DOCUMENT', $3, $4, 'FAILED', $5, $6, $7::jsonb);
+    `, [user.userId, user.organizationId, documentId, metadata.case_id, req.ip, req.headers['user-agent'],
+            JSON.stringify({ expected: metadata.sha256_hash, actual: actualHash })]);
+        return res.status(409).json({
+            error: 'Integrity Failure',
+            message: 'Stored document failed hash verification and will not be served. Security audit has been notified.',
+        });
+    }
     // Audit download
     await (0, db_1.query)(`
     INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, case_id, result, ip_address, user_agent, after_value)
@@ -96,6 +114,7 @@ router.get('/:id/download', auth_1.requireAuth, async (req, res) => {
     res.setHeader('Content-Type', metadata.mime_type);
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(metadata.file_name)}"`);
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
     stream.pipe(res);
 });
 exports.default = router;

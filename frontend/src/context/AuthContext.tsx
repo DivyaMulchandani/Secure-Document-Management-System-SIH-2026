@@ -79,7 +79,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const hasPermission = (permission: string) => {
     if (!user) return false;
-    if (user.roleId === 'MASTER_ADMIN') return true;
+    if (user.roleId === 'MASTER_ADMIN' || user.roleId === 'SYSTEM_MASTER_ADMIN') return true;
     return user.permissions.includes(permission);
   };
 
