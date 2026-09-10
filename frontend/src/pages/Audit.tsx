@@ -73,17 +73,17 @@ export const Audit: React.FC = () => {
       {/* Hash-Chained Ledger Integrity */}
       <div className={`glass-card p-4 border ${
         ledger == null ? 'border-border'
-          : ledger.valid ? 'border-success/40' : 'border-danger/50'
+          : ledger.valid ? 'border-emerald-600/40 bg-emerald-50/20' : 'border-red-600/50 bg-red-50/20'
       }`}>
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <div className="text-xs font-bold text-primary-text flex items-center gap-2">
               <span>🔗 Cryptographic Ledger Integrity</span>
               {ledger != null && (
-                <span className={`px-2 py-0.5 rounded text-[10px] font-mono ${
+                <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
                   ledger.valid
-                    ? 'bg-success-light text-success border border-success/30'
-                    : 'bg-danger-light text-danger border border-danger/30'
+                    ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                    : 'bg-red-100 text-red-800 border border-red-300'
                 }`}>
                   {ledger.valid ? 'CHAIN INTACT ✓' : 'CHAIN BROKEN ✗'}
                 </span>

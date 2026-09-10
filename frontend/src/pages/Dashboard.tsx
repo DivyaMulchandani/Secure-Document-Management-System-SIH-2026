@@ -90,7 +90,7 @@ export const Dashboard: React.FC = () => {
                 onClick={() => navigate('/users?filterTier=ADMINS')}
                 className="px-2.5 py-1.5 rounded bg-surface hover:bg-surface-hover text-primary-text border border-border font-mono text-xs flex items-center gap-1.5 transition-colors"
               >
-                <ShieldIcon className="w-3.5 h-3.5 text-blue-400" />
+                <ShieldIcon className="w-3.5 h-3.5 text-blue-700" />
                 <span>Manage Administrators</span>
               </button>
               <button
@@ -145,14 +145,14 @@ export const Dashboard: React.FC = () => {
             </div>
             <div className="p-3 bg-surface rounded border border-border">
               <span className="text-muted-text block text-[10px] uppercase font-bold">Subordinate Admins</span>
-              <span className="font-semibold text-blue-400 mt-0.5 text-base block">
+              <span className="font-semibold text-blue-700 mt-0.5 text-base block">
                 {stats?.agencyBodies?.[user?.agencyBranch]?.layerAdmins ?? 1}
               </span>
               <span className="text-[10px] text-muted-text mt-0.5 block">Layer Administrators</span>
             </div>
             <div className="p-3 bg-surface rounded border border-border col-span-2 sm:col-span-1">
               <span className="text-muted-text block text-[10px] uppercase font-bold">Users in Scope</span>
-              <span className="font-semibold text-emerald-400 mt-0.5 text-base block">
+              <span className="font-semibold text-emerald-700 mt-0.5 text-base block">
                 {stats?.usersCount || 1}
               </span>
               <span className="text-[10px] text-muted-text mt-0.5 block">Total Personnel</span>
@@ -165,59 +165,59 @@ export const Dashboard: React.FC = () => {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="glass-card p-4 border border-border">
           <div className="flex items-center justify-between text-muted-text mb-2">
-            <span className="text-xs font-mono font-medium">TOTAL CASES</span>
-            <FileTextIcon className="w-4 h-4 text-accent" />
+            <span className="text-xs font-mono font-bold text-slate-700">TOTAL CASES</span>
+            <FileTextIcon className="w-4 h-4 text-blue-700" />
           </div>
           <div className="text-2xl font-bold text-primary-text font-mono">
             {loading ? '...' : stats?.cases?.total_cases || 0}
           </div>
           <div className="text-[11px] text-muted-text mt-1 flex items-center gap-2">
-            <span className="text-warning font-mono">{stats?.cases?.under_investigation || 0}</span> investigating
+            <span className="text-amber-700 font-bold font-mono">{stats?.cases?.under_investigation || 0}</span> investigating
             <span>•</span>
-            <span className="text-accent font-mono">{stats?.cases?.chargesheeted || 0}</span> chargesheeted
+            <span className="text-blue-700 font-bold font-mono">{stats?.cases?.chargesheeted || 0}</span> chargesheeted
           </div>
         </div>
 
         <div className="glass-card p-4 border border-border">
           <div className="flex items-center justify-between text-muted-text mb-2">
-            <span className="text-xs font-mono font-medium">EVIDENCE IN CUSTODY</span>
-            <ShieldIcon className="w-4 h-4 text-blue-400" />
+            <span className="text-xs font-mono font-bold text-slate-700">EVIDENCE IN CUSTODY</span>
+            <ShieldIcon className="w-4 h-4 text-blue-700" />
           </div>
           <div className="text-2xl font-bold text-primary-text font-mono">
             {loading ? '...' : stats?.evidence?.total_evidence || 0}
           </div>
           <div className="text-[11px] text-muted-text mt-1 flex items-center gap-2">
-            <span className="text-blue-400 font-mono">{stats?.evidence?.in_police_custody || 0}</span> police
+            <span className="text-blue-700 font-bold font-mono">{stats?.evidence?.in_police_custody || 0}</span> police
             <span>•</span>
-            <span className="text-purple-400 font-mono">{stats?.evidence?.in_forensic_lab || 0}</span> in lab
+            <span className="text-indigo-700 font-bold font-mono">{stats?.evidence?.in_forensic_lab || 0}</span> in lab
           </div>
         </div>
 
         <div className="glass-card p-4 border border-border">
           <div className="flex items-center justify-between text-muted-text mb-2">
-            <span className="text-xs font-mono font-medium">FORENSIC EXAMS</span>
-            <FlaskIcon className="w-4 h-4 text-purple-400" />
+            <span className="text-xs font-mono font-bold text-slate-700">FORENSIC EXAMS</span>
+            <FlaskIcon className="w-4 h-4 text-indigo-700" />
           </div>
           <div className="text-2xl font-bold text-primary-text font-mono">
             {loading ? '...' : stats?.forensics?.total_submissions || 0}
           </div>
           <div className="text-[11px] text-muted-text mt-1 flex items-center gap-2">
-            <span className="text-warning font-mono">{stats?.forensics?.pending_examination || 0}</span> pending
+            <span className="text-amber-700 font-bold font-mono">{stats?.forensics?.pending_examination || 0}</span> pending
             <span>•</span>
-            <span className="text-success font-mono">{stats?.forensics?.reports_sealed || 0}</span> reports sealed
+            <span className="text-emerald-700 font-bold font-mono">{stats?.forensics?.reports_sealed || 0}</span> sealed
           </div>
         </div>
 
         <div className="glass-card p-4 border border-border">
           <div className="flex items-center justify-between text-muted-text mb-2">
-            <span className="text-xs font-mono font-medium">COURT ADJUDICATIONS</span>
-            <ScaleIcon className="w-4 h-4 text-amber-400" />
+            <span className="text-xs font-mono font-bold text-slate-700">COURT ADJUDICATIONS</span>
+            <ScaleIcon className="w-4 h-4 text-emerald-700" />
           </div>
           <div className="text-2xl font-bold text-primary-text font-mono">
             {loading ? '...' : stats?.court?.total_court_cases || 0}
           </div>
           <div className="text-[11px] text-muted-text mt-1 flex items-center gap-2">
-            <span className="text-amber-400 font-mono">{stats?.court?.pending_trials || 0}</span> in trial
+            <span className="text-emerald-700 font-bold font-mono">{stats?.court?.pending_trials || 0}</span> in trial
             <span>•</span>
             <span className="text-success font-mono">{stats?.court?.disposed_trials || 0}</span> disposed
           </div>

@@ -2,12 +2,15 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { Request, Response, NextFunction } from 'express';
 import { query } from './db';
+import { sendOtpEmail } from './mailer';
 
 export interface UserSessionPayload {
   userId: string;
   username: string;
+  email: string;
   displayName: string;
   badgeNumber?: string;
+  governmentId?: string;
   phoneNumber?: string;
   designation?: string;
   departmentWing?: string;
@@ -45,7 +48,7 @@ const SESSION_TTL_HOURS = 8;
 export async function authenticateCredentials(username: string, plainPassword: string, ip: string, userAgent: string) {
   // Query user by username
   const userRes = await query(`
-    SELECT u.id, u.username, u.email, u.display_name, u.badge_number, u.password_hash,
+    SELECT u.id, u.username, u.email, u.display_name, u.badge_number, u.government_id, u.password_hash,
            u.phone_number, u.designation, u.department_wing, u.clearance_level, u.is_layer_admin,
            u.status, u.failed_login_count, u.locked_until,
            r.id as role_id, r.name as role_name, r.agency_branch as role_agency_branch,
@@ -155,8 +158,226 @@ export async function authenticateCredentials(username: string, plainPassword: s
   const userPayload: UserSessionPayload = {
     userId: u.id,
     username: u.username,
+    email: u.email,
     displayName: u.display_name,
     badgeNumber: u.badge_number,
+    governmentId: u.government_id || u.badge_number,
+    phoneNumber: u.phone_number,
+    designation: u.designation,
+    departmentWing: u.department_wing,
+    clearanceLevel: u.clearance_level || 'CONFIDENTIAL',
+    isLayerAdmin: !!u.is_layer_admin,
+    roleId: u.role_id,
+    roleName: u.role_name,
+    agencyBranch: (u.body_id || u.org_agency_branch || (u.role_agency_branch !== 'ALL' ? u.role_agency_branch : 'POLICE')) as any,
+    bodyId: u.body_id || u.org_agency_branch,
+    organizationId: u.org_id,
+    organizationName: u.org_name,
+    organizationCode: u.org_code,
+    organizationPath: u.org_path,
+    permissions,
+    adminScopes,
+  };
+
+  return { success: true, sessionToken, user: userPayload };
+}
+
+export function maskEmail(email: string): string {
+  if (!email || !email.includes('@')) return '***@gov.in';
+  const [user, domain] = email.split('@');
+  const visible = user.length > 2 ? user.slice(0, 2) : user.slice(0, 1);
+  return `${visible}***@${domain}`;
+}
+
+export async function requestLoginOtp(identifier: string, ip: string, userAgent: string) {
+  const trimmed = identifier.trim().toLowerCase();
+  const userRes = await query(`
+    SELECT u.id, u.username, u.email, u.display_name, u.status, u.locked_until,
+           u.primary_organization_id as org_id, o.body_id, o.agency_branch
+    FROM users u
+    JOIN organization_nodes o ON u.primary_organization_id = o.id
+    WHERE LOWER(u.email) = $1 
+       OR LOWER(u.username) = $1 
+       OR LOWER(COALESCE(u.government_id, '')) = $1
+       OR LOWER(COALESCE(u.badge_number, '')) = $1;
+  `, [trimmed]);
+
+  if (userRes.rows.length === 0) {
+    await query(`
+      INSERT INTO audit_logs (action, resource_type, resource_id, result, ip_address, user_agent, after_value)
+      VALUES ('LOGIN_OTP_DENIED', 'USER', $1, 'DENY', $2, $3, '{"reason": "User not found for OTP request"}');
+    `, [identifier, ip, userAgent]);
+    return { success: false, error: 'No official personnel account found matching this identifier', code: 404 };
+  }
+
+  const u = userRes.rows[0];
+
+  if (u.locked_until && new Date(u.locked_until) > new Date()) {
+    const remainingMins = Math.ceil((new Date(u.locked_until).getTime() - Date.now()) / (60 * 1000));
+    return { success: false, error: `Account locked due to consecutive failed attempts. Try again in ${remainingMins} minutes.`, code: 423 };
+  }
+
+  if (u.status !== 'ACTIVE') {
+    return { success: false, error: 'Account has been disabled or suspended by an administrator.', code: 403 };
+  }
+
+  // Invalidate previous unconsumed OTPs for this email
+  await query(`
+    UPDATE login_otps SET consumed = TRUE 
+    WHERE LOWER(email) = LOWER($1) AND consumed = FALSE;
+  `, [u.email]);
+
+  // Generate 6-digit cryptographic OTP
+  const otpCode = Math.floor(100000 + crypto.randomInt(900000)).toString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+  await query(`
+    INSERT INTO login_otps (email, otp_code, expires_at, ip_address)
+    VALUES ($1, $2, $3, $4);
+  `, [u.email.toLowerCase(), otpCode, expiresAt, ip]);
+
+  // Audit OTP Request
+  const otpMeta = JSON.stringify({ email: u.email, method: 'PASSWORDLESS_OTP' });
+  await query(`
+    INSERT INTO audit_logs (
+      user_id, actor_user_id, organization_id, organization_node_id, body_id,
+      action, resource_type, resource_id, result, ip_address, user_agent, metadata
+    )
+    VALUES ($1, $1, $2, $2, $3, 'LOGIN_OTP_REQUESTED', 'SESSION', $4, 'ALLOW', $5, $6, $7::jsonb);
+  `, [u.id, u.org_id, u.body_id || u.agency_branch, u.email, ip, userAgent, otpMeta]);
+
+  console.log(`[LEA AUTH GATEWAY] Login OTP generated for ${u.email}: [ ${otpCode} ] (Valid 10 mins)`);
+
+  const mailResult = await sendOtpEmail(u.email, otpCode, 'LOGIN_AUTHENTICATION', {
+    displayName: u.display_name,
+    ipAddress: ip,
+  });
+
+  return {
+    success: true,
+    message: mailResult.mode === 'LIVE_SMTP'
+      ? `Verification code dispatched via secure SMTP relay to registered government email ${maskEmail(u.email)}`
+      : `Verification code sent to registered government email ${maskEmail(u.email)}`,
+    email: u.email,
+    emailMasked: maskEmail(u.email),
+    devOtpPreview: otpCode,
+    deliveryMode: mailResult.mode,
+  };
+}
+
+export async function verifyLoginOtp(identifier: string, otpCode: string, ip: string, userAgent: string) {
+  const trimmed = identifier.trim().toLowerCase();
+  const userRes = await query(`
+    SELECT u.id, u.username, u.email, u.display_name, u.badge_number, u.government_id,
+           u.phone_number, u.designation, u.department_wing, u.clearance_level, u.is_layer_admin,
+           u.status, u.failed_login_count, u.locked_until,
+           r.id as role_id, r.name as role_name, r.agency_branch as role_agency_branch,
+           o.id as org_id, o.body_id, o.agency_branch as org_agency_branch, o.name as org_name, o.code as org_code, o.hierarchy_path as org_path
+    FROM users u
+    JOIN roles r ON u.primary_role_id = r.id
+    JOIN organization_nodes o ON u.primary_organization_id = o.id
+    WHERE LOWER(u.email) = $1 
+       OR LOWER(u.username) = $1 
+       OR LOWER(COALESCE(u.government_id, '')) = $1
+       OR LOWER(COALESCE(u.badge_number, '')) = $1;
+  `, [trimmed]);
+
+  if (userRes.rows.length === 0) {
+    return { success: false, error: 'Official personnel account not found', code: 404 };
+  }
+
+  const u = userRes.rows[0];
+
+  if (u.locked_until && new Date(u.locked_until) > new Date()) {
+    const remainingMins = Math.ceil((new Date(u.locked_until).getTime() - Date.now()) / (60 * 1000));
+    return { success: false, error: `Account locked. Try again in ${remainingMins} minutes.`, code: 423 };
+  }
+
+  if (u.status !== 'ACTIVE') {
+    return { success: false, error: 'Account suspended or inactive.', code: 403 };
+  }
+
+  // Check valid unconsumed OTP
+  const otpRes = await query(`
+    SELECT id, otp_code, expires_at 
+    FROM login_otps 
+    WHERE LOWER(email) = LOWER($1) AND consumed = FALSE AND expires_at > NOW()
+    ORDER BY created_at DESC LIMIT 1;
+  `, [u.email]);
+
+  if (otpRes.rows.length === 0 || otpRes.rows[0].otp_code !== otpCode.trim()) {
+    const newCount = (u.failed_login_count || 0) + 1;
+    let lockUntil = null;
+    if (newCount >= 5) {
+      lockUntil = new Date(Date.now() + 30 * 60 * 1000);
+    }
+    await query(`
+      UPDATE users SET failed_login_count = $1, locked_until = $2, updated_at = NOW() WHERE id = $3;
+    `, [newCount, lockUntil, u.id]);
+
+    await query(`
+      INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, result, ip_address, user_agent, after_value)
+      VALUES ($1, $2, 'LOGIN_FAILURE', 'USER', $3, 'DENY', $4, $5, json_build_object('reason', 'Invalid OTP', 'attempt', $6));
+    `, [u.id, u.org_id, u.email, ip, userAgent, newCount]);
+
+    return { success: false, error: 'Invalid or expired one-time verification code', code: 401 };
+  }
+
+  // Mark OTP consumed
+  await query(`UPDATE login_otps SET consumed = TRUE WHERE id = $1;`, [otpRes.rows[0].id]);
+
+  // Reset failed login count
+  await query(`
+    UPDATE users SET failed_login_count = 0, locked_until = NULL, last_login_at = NOW(), updated_at = NOW()
+    WHERE id = $1;
+  `, [u.id]);
+
+  // Load user permissions
+  const permRes = await query(`SELECT permission_id FROM role_permissions WHERE role_id = $1;`, [u.role_id]);
+  const permissions = permRes.rows.map(r => r.permission_id);
+
+  // Load admin scopes
+  const scopesRes = await query(`
+    SELECT s.organization_node_id, s.scope_type, o.name as org_name, o.code as org_code, o.hierarchy_path
+    FROM admin_scopes s
+    JOIN organization_nodes o ON s.organization_node_id = o.id
+    WHERE s.user_id = $1;
+  `, [u.id]);
+  const adminScopes = scopesRes.rows.map(r => ({
+    organizationNodeId: r.organization_node_id,
+    scopeType: r.scope_type,
+    orgName: r.org_name,
+    orgCode: r.org_code,
+    hierarchyPath: r.hierarchy_path,
+  }));
+
+  // Generate session token
+  const sessionToken = crypto.randomBytes(32).toString('hex');
+  const sessionHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
+  const expiresAt = new Date(Date.now() + SESSION_TTL_HOURS * 60 * 60 * 1000);
+
+  await query(`
+    INSERT INTO user_sessions (id, user_id, ip_address, user_agent, expires_at)
+    VALUES ($1, $2, $3, $4, $5);
+  `, [sessionHash, u.id, ip, userAgent, expiresAt]);
+
+  // Audit login success
+  const metaJson = JSON.stringify({ email: u.email, username: u.username, method: 'PASSWORDLESS_OTP' });
+  await query(`
+    INSERT INTO audit_logs (
+      user_id, actor_user_id, organization_id, organization_node_id, body_id,
+      action, resource_type, resource_id, result, ip_address, user_agent, metadata, after_value
+    )
+    VALUES ($1, $1, $2, $2, $3, 'LOGIN', 'SESSION', $4, 'ALLOW', $5, $6, $7::jsonb, $7::jsonb);
+  `, [u.id, u.org_id, u.body_id || u.agency_branch, u.username, ip, userAgent, metaJson]);
+
+  const userPayload: UserSessionPayload = {
+    userId: u.id,
+    username: u.username,
+    email: u.email,
+    displayName: u.display_name,
+    badgeNumber: u.badge_number,
+    governmentId: u.government_id || u.badge_number,
     phoneNumber: u.phone_number,
     designation: u.designation,
     departmentWing: u.department_wing,
@@ -205,7 +426,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 
   const sessRes = await query(`
     SELECT s.id as session_id, s.expires_at,
-           u.id as user_id, u.username, u.display_name, u.badge_number,
+           u.id as user_id, u.username, u.email, u.display_name, u.badge_number, u.government_id,
            u.phone_number, u.designation, u.department_wing, u.clearance_level, u.is_layer_admin,
            u.status as user_status,
            r.id as role_id, r.name as role_name, r.agency_branch as role_agency_branch,
@@ -258,8 +479,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   req.userSession = {
     userId: s.user_id,
     username: s.username,
+    email: s.email,
     displayName: s.display_name,
     badgeNumber: s.badge_number,
+    governmentId: s.government_id || s.badge_number,
     phoneNumber: s.phone_number,
     designation: s.designation,
     departmentWing: s.department_wing,

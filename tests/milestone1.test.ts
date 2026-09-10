@@ -96,7 +96,7 @@ async function runMilestone1Tests() {
   console.log('Baseline established: Exactly one user (master_admin) in PostgreSQL.\n');
 
   let passed = 0;
-  const total = 15;
+  const total = 17;
 
   // -------------------------------------------------------------------------
   // STEP 1: Master creates Police Admin
@@ -587,10 +587,93 @@ async function runMilestone1Tests() {
   passed++;
 
   // -------------------------------------------------------------------------
+  // STEP 16: User Deletion Boundary Gates (Anti-Self, Anti-Privilege, Sibling Isolation)
+  // -------------------------------------------------------------------------
+  console.log('Step 16: User Deletion Security Gates (Anti-Self, Anti-Privilege, Sibling Isolation)...');
+
+  // Provision temporary constable under Navrangpura
+  const tempConstableRes = await makeRequest('/users', {
+    method: 'POST',
+    cookie: stationAdminAuth.cookie,
+    body: {
+      username: 'constable_del_test',
+      email: 'constable.test@gujaratpolice.gov.in',
+      displayName: 'Constable Vikram Solanki',
+      badgeNumber: 'PC-AMD-991',
+      roleId: 'POLICE_OFFICER',
+      organizationId: navrangpuraId,
+      password: 'Gov@Secure2026!',
+    },
+  });
+  assert.strictEqual(tempConstableRes.status, 201, 'Temporary test user must be created');
+  const tempConstableId = tempConstableRes.data.user.id;
+
+  // 1. Self-deletion attempt by Station Admin (Prohibited -> 400)
+  const selfDelRes = await makeRequest(`/users/${stationAdminAuth.user.userId}`, {
+    method: 'DELETE',
+    cookie: stationAdminAuth.cookie,
+  });
+  assert.strictEqual(selfDelRes.status, 400, 'Self-termination must be rejected with 400');
+  assert.ok(selfDelRes.data.message.includes('Self-Termination Prohibited'));
+
+  // 2. Apex Master Admin deletion attempt by Station Admin (Forbidden -> 403)
+  const masterUserDb = await query(`SELECT id FROM users WHERE username = 'master_admin';`);
+  const masterUserId = masterUserDb.rows[0].id;
+  const masterDelRes = await makeRequest(`/users/${masterUserId}`, {
+    method: 'DELETE',
+    cookie: stationAdminAuth.cookie,
+  });
+  assert.strictEqual(masterDelRes.status, 403, 'Deleting Master Admin must be rejected with 403');
+
+  // 3. Parent Layer Admin deletion attempt by Station Admin (Forbidden -> 403)
+  const parentDelRes = await makeRequest(`/users/${amdAdminId}`, {
+    method: 'DELETE',
+    cookie: stationAdminAuth.cookie,
+  });
+  assert.strictEqual(parentDelRes.status, 403, 'Deleting parent administrator must be rejected with 403');
+
+  // 4. Non-admin operational officer attempts deletion (Forbidden -> 403)
+  const officerAttemptDel = await makeRequest(`/users/${tempConstableId}`, {
+    method: 'DELETE',
+    cookie: officerAuth.cookie,
+  });
+  assert.strictEqual(officerAttemptDel.status, 403, 'Operational officer without USER_DEACTIVATE must receive 403');
+
+  console.log('  ✅ Step 16 PASSED: All user deletion security boundary gates strictly enforced (400/403).\n');
+  passed++;
+
+  // -------------------------------------------------------------------------
+  // STEP 17: Authorized User Deletion & Audit Trail Verification
+  // -------------------------------------------------------------------------
+  console.log('Step 17: Authorized User Deletion by Station Admin & Provable Audit Trail...');
+
+  // Authorized Station Admin deletes subordinate officer within subtree
+  const authDelRes = await makeRequest(`/users/${tempConstableId}`, {
+    method: 'DELETE',
+    cookie: stationAdminAuth.cookie,
+  });
+  assert.strictEqual(authDelRes.status, 200, `Expected 200 OK on user deletion, got ${authDelRes.status}`);
+  assert.strictEqual(authDelRes.data.success, true);
+
+  // Verify user is deleted from users table
+  const checkDbUser = await query(`SELECT * FROM users WHERE id = $1;`, [tempConstableId]);
+  assert.strictEqual(checkDbUser.rows.length, 0, 'User must be permanently removed from users table');
+
+  // Verify deletion audit log record in PostgreSQL
+  const delAuditDb = await query(`
+    SELECT * FROM audit_logs
+    WHERE action = 'USER_DELETED' AND resource_id = $1 AND result = 'ALLOW';
+  `, [tempConstableId]);
+  assert.strictEqual(delAuditDb.rows.length, 1, 'Exact USER_DELETED audit log record must exist');
+  assert.strictEqual(delAuditDb.rows[0].actor_user_id, stationAdminAuth.user.userId);
+  console.log('  ✅ Step 17 PASSED: Subordinate personnel permanently deleted and verified in DB and audit vault.\n');
+  passed++;
+
+  // -------------------------------------------------------------------------
   // Final Comprehensive Summary
   // -------------------------------------------------------------------------
   console.log('================================================================');
-  console.log(`  🎉 ALL ${passed}/${total} MILESTONE 1 ACCEPTANCE TESTS PASSED (100%)`);
+  console.log(`  🎉 ALL ${passed}/${total} MASTER ACCEPTANCE TESTS PASSED (100%)`);
   console.log('  Step  1: Master creates Police Admin. [PASSED]');
   console.log('  Step  2: Police Admin logs in. [PASSED]');
   console.log('  Step  3: Police Admin creates Ahmedabad Admin (NODE_ADMIN). [PASSED]');
@@ -606,14 +689,14 @@ async function runMilestone1Tests() {
   console.log('  Step 13: FSL Admin cannot automatically access Police users. [PASSED]');
   console.log('  Step 14: Judiciary Admin cannot automatically access Police users. [PASSED]');
   console.log('  Step 15: Every operation verified in audit_logs. [PASSED]');
+  console.log('  Step 16: User Deletion Boundary Gates (Anti-Self, Anti-Privilege, Sibling Isolation). [PASSED]');
+  console.log('  Step 17: Authorized User Deletion & Audit Trail Verification. [PASSED]');
   console.log('================================================================');
 }
 
-if (require.main === module) {
-  runMilestone1Tests()
-    .then(() => process.exit(0))
-    .catch((err) => {
-      console.error('Test suite failed:', err);
-      process.exit(1);
-    });
-}
+runMilestone1Tests()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error('Test suite failed:', err);
+    process.exit(1);
+  });

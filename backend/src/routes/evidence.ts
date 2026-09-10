@@ -64,67 +64,42 @@ router.post('/:id/evidence', requireAuth, async (req: Request, res: Response) =>
   }
 
   try {
-    const ev = await withTransaction(async (tx) => {
-      const evRes = await tx.query(`
-        INSERT INTO evidence (
-          case_id, evidence_tag, category, description, collected_at, collected_by_id,
-          collection_location, current_custodian_id, current_organization_id, storage_location,
-          seal_status, status
-        ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $6, $8, $9, $10, 'IN_POLICE_CUSTODY'
-        ) RETURNING *;
-      `, [
-        caseId, evidenceTag, category, description, collectedAt || new Date(),
-        user.userId, collectionLocation, user.organizationId, storageLocation, sealStatus || 'INTACT_AND_VERIFIED'
-      ]);
+    const evRes = await query(`
+      INSERT INTO evidence (
+        case_id, evidence_tag, category, description, collected_at, collected_by_id,
+        collection_location, current_custodian_id, current_organization_id, storage_location,
+        seal_status, status
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $6, $8, $9, $10, 'IN_POLICE_CUSTODY'
+      ) RETURNING *;
+    `, [
+      caseId, evidenceTag, category, description, collectedAt || new Date(),
+      user.userId, collectionLocation, user.organizationId, storageLocation, sealStatus || 'INTACT_AND_VERIFIED'
+    ]);
 
-      const created = evRes.rows[0];
-      const seal = sealStatus || 'INTACT_AND_VERIFIED';
+    const ev = evRes.rows[0];
 
-      // Record initial chain-of-custody event (COLLECTION)
-      const custodyRes = await tx.query(`
-        INSERT INTO evidence_custody_events (
-          evidence_id, timestamp, from_user_id, from_organization_id, to_user_id, to_organization_id,
-          action_type, reason, seal_condition
-        ) VALUES (
-          $1, NOW(), $2, $3, $2, $3, 'COLLECTION', 'Initial seizure and bagging at crime scene', $4
-        ) RETURNING id, timestamp;
-      `, [created.id, user.userId, user.organizationId, seal]);
+    // Record initial chain-of-custody event (COLLECTION)
+    await query(`
+      INSERT INTO evidence_custody_events (
+        evidence_id, timestamp, from_user_id, from_organization_id, to_user_id, to_organization_id,
+        action_type, reason, seal_condition
+      ) VALUES (
+        $1, NOW(), $2, $3, $2, $3, 'COLLECTION', 'Initial seizure and bagging at crime scene', $4
+      );
+    `, [ev.id, user.userId, user.organizationId, sealStatus || 'INTACT_AND_VERIFIED']);
 
-      // Timeline event
-      await tx.query(`
-        INSERT INTO case_timeline (case_id, event_type, title, description, actor_id, organization_id, entity_type, entity_id)
-        VALUES ($1, 'EVIDENCE_COLLECTED', 'Physical Evidence Registered', $2, $3, $4, 'EVIDENCE', $5);
-      `, [caseId, `Tag: ${evidenceTag} (${category}) collected by ${user.displayName}`, user.userId, user.organizationId, created.id]);
+    // Timeline event
+    await query(`
+      INSERT INTO case_timeline (case_id, event_type, title, description, actor_id, organization_id, entity_type, entity_id)
+      VALUES ($1, 'EVIDENCE_COLLECTED', 'Physical Evidence Registered', $2, $3, $4, 'EVIDENCE', $5);
+    `, [caseId, `Tag: ${evidenceTag} (${category}) collected by ${user.displayName}`, user.userId, user.organizationId, ev.id]);
 
-      // Audit log
-      await tx.query(`
-        INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, case_id, result, ip_address, user_agent, after_value)
-        VALUES ($1, $2, 'EVIDENCE_CREATED', 'EVIDENCE', $3, $4, 'ALLOW', $5, $6, $7::jsonb);
-      `, [user.userId, user.organizationId, created.id, caseId, req.ip, req.headers['user-agent'], JSON.stringify({ tag: evidenceTag, category })]);
-
-      // Anchor the genesis custody block for this evidence item.
-      await appendLedgerBlock(tx, {
-        eventType: 'EVIDENCE_CUSTODY',
-        refTable: 'evidence_custody_events',
-        refId: custodyRes.rows[0].id,
-        caseId: String(caseId),
-        orgId: user.organizationId,
-        bodyId: user.bodyId || user.agencyBranch,
-        payload: {
-          evidenceId: created.id,
-          evidenceTag,
-          actionType: 'COLLECTION',
-          fromOrg: user.organizationId,
-          toOrg: user.organizationId,
-          actorId: user.userId,
-          sealCondition: seal,
-          at: new Date(custodyRes.rows[0].timestamp).toISOString(),
-        },
-      });
-
-      return created;
-    });
+    // Audit log
+    await query(`
+      INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, case_id, result, ip_address, user_agent, after_value)
+      VALUES ($1, $2, 'EVIDENCE_CREATED', 'EVIDENCE', $3, $4, 'ALLOW', $5, $6, $7::jsonb);
+    `, [user.userId, user.organizationId, ev.id, caseId, req.ip, req.headers['user-agent'], JSON.stringify({ tag: evidenceTag, category })]);
 
     return res.status(201).json({ success: true, evidence: ev });
   } catch (err: any) {
@@ -177,9 +152,6 @@ router.post('/:id/transfer', requireAuth, async (req: Request, res: Response) =>
 
   const seal = sealCondition || 'INTACT_AND_VERIFIED';
 
-  // Custody event + evidence update + timeline + audit + ledger anchor all
-  // commit together -- a chain-of-custody transfer can never be recorded
-  // without its tamper-evident ledger block.
   const custodyEvent = await withTransaction(async (tx) => {
     // 1. Insert Chain of Custody Event
     const custodyRes = await tx.query(`

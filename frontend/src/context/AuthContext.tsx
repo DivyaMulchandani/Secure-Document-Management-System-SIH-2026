@@ -4,8 +4,10 @@ import { api } from '../lib/api';
 export interface UserProfile {
   userId: string;
   username: string;
+  email: string;
   displayName: string;
   badgeNumber?: string;
+  governmentId?: string;
   phoneNumber?: string;
   designation?: string;
   departmentWing?: string;
@@ -26,6 +28,8 @@ interface AuthContextType {
   user: UserProfile | null;
   loading: boolean;
   login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  requestOtp: (identifier: string) => Promise<{ success: boolean; error?: string; devOtpPreview?: string; message?: string; emailMasked?: string }>;
+  verifyOtp: (identifier: string, otp: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
   hasPermission: (permission: string) => boolean;
   isInAgency: (branch: string) => boolean;
@@ -56,6 +60,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     refreshUser();
   }, []);
+
+  const requestOtp = async (identifier: string) => {
+    try {
+      const res = await api.post<{
+        success: boolean;
+        message?: string;
+        emailMasked?: string;
+        devOtpPreview?: string;
+      }>('/auth/request-otp', { identifier });
+      return { success: true, ...res };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to dispatch verification OTP' };
+    }
+  };
+
+  const verifyOtp = async (identifier: string, otp: string) => {
+    try {
+      const res = await api.post<{ success: boolean; user: UserProfile }>('/auth/verify-otp', { identifier, otp });
+      if (res.success && res.user) {
+        setUser(res.user);
+        return { success: true };
+      }
+      return { success: false, error: 'OTP Verification Failed' };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Verification failed. Please check the code.' };
+    }
+  };
 
   const login = async (username: string, password: string) => {
     try {
@@ -90,7 +121,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, hasPermission, isInAgency, refreshUser }}>
+    <AuthContext.Provider value={{ user, loading, login, requestOtp, verifyOtp, logout, hasPermission, isInAgency, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

@@ -15,6 +15,8 @@ import { Users } from './pages/Users';
 import { Delegations } from './pages/Delegations';
 import { Search } from './pages/Search';
 import { Audit } from './pages/Audit';
+import { Tickets } from './pages/Tickets';
+import { AdminHierarchy } from './pages/AdminHierarchy';
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode; requiredPermission?: string }> = ({
   children,
@@ -120,6 +122,14 @@ const App: React.FC = () => {
             }
           />
           <Route
+            path="/admin-hierarchy"
+            element={
+              <ProtectedRoute>
+                <AdminHierarchy />
+              </ProtectedRoute>
+            }
+          />
+          <Route
             path="/users"
             element={
               <ProtectedRoute>
@@ -148,6 +158,14 @@ const App: React.FC = () => {
             element={
               <ProtectedRoute requiredPermission="AUDIT_READ">
                 <Audit />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/tickets"
+            element={
+              <ProtectedRoute>
+                <Tickets />
               </ProtectedRoute>
             }
           />

@@ -31,8 +31,7 @@ export async function seedDatabase(): Promise<void> {
       delegated_access,
       documents,
       cases,
-      user_sessions,
-      ledger_blocks
+      user_sessions
     CASCADE;
   `);
 
@@ -170,6 +169,57 @@ export async function seedDatabase(): Promise<void> {
       VALUES ($1, $2, $3, $4, $5)
       ON CONFLICT (id) DO UPDATE SET code = EXCLUDED.code, name = EXCLUDED.name, description = EXCLUDED.description, body_id = EXCLUDED.body_id;
     `, [nt.id, nt.code, nt.name, nt.description, nt.body_id]);
+  }
+
+  // 1d. Seed Institutional Admin Levels
+  console.log('Seeding institutional admin hierarchy levels...');
+  const adminLevels = [
+    { id: 'MASTER_L1_APEX', level_number: 1, body_id: 'MASTER', name: 'System Master Apex Admin', description: 'State Sovereign System Root Authority', clearance_required: 'TOP_SECRET' },
+    { id: 'POL_L1_DGP', level_number: 1, body_id: 'POLICE', name: 'State Police Apex Command (DGP)', description: 'Statewide Police Command & Control Authority', clearance_required: 'TOP_SECRET' },
+    { id: 'POL_L2_COMM', level_number: 2, body_id: 'POLICE', name: 'Metropolitan / Range Admin (CP/IGP)', description: 'Commissionerate & Range Level Governance', clearance_required: 'SECRET' },
+    { id: 'POL_L3_DIV', level_number: 3, body_id: 'POLICE', name: 'Divisional / District Admin (DCP/SP)', description: 'Zonal & District Command Authority', clearance_required: 'SECRET' },
+    { id: 'POL_L4_STATION', level_number: 4, body_id: 'POLICE', name: 'Station SHO Admin (PI/Senior Officer)', description: 'Police Station / Outpost Unit Administrator', clearance_required: 'CONFIDENTIAL' },
+    { id: 'POL_L5_DESK', level_number: 5, body_id: 'POLICE', name: 'Section / Special Desk Admin (PSI/Desk)', description: 'Cyber / SOG / Evidence Desk Administrator', clearance_required: 'CONFIDENTIAL' },
+    { id: 'JUD_L1_HIGH_COURT', level_number: 1, body_id: 'JUDICIARY', name: 'High Court Apex Admin (Registrar General)', description: 'Apex Judiciary Command & Registry Authority', clearance_required: 'TOP_SECRET' },
+    { id: 'JUD_L2_DISTRICT', level_number: 2, body_id: 'JUDICIARY', name: 'Principal District Judge Admin', description: 'District & Sessions Court Administration', clearance_required: 'SECRET' },
+    { id: 'JUD_L3_SUBDIV', level_number: 3, body_id: 'JUDICIARY', name: 'Sub-Divisional Court Admin', description: 'Taluka & Sub-Divisional Court Governance', clearance_required: 'SECRET' },
+    { id: 'JUD_L4_MAGISTRATE', level_number: 4, body_id: 'JUDICIARY', name: 'Court Unit / Registry Admin', description: 'JMFC & Court Registry Section Admin', clearance_required: 'CONFIDENTIAL' },
+    { id: 'FOR_L1_DIRECTOR', level_number: 1, body_id: 'FORENSICS', name: 'Directorate Apex Admin (Director SFSL)', description: 'Statewide Forensic Science Directorate Command', clearance_required: 'TOP_SECRET' },
+    { id: 'FOR_L2_REGIONAL', level_number: 2, body_id: 'FORENSICS', name: 'Regional Lab Admin (Joint/Addl Director)', description: 'Regional Forensic Science Lab Governance', clearance_required: 'SECRET' },
+    { id: 'FOR_L3_DIVISION', level_number: 3, body_id: 'FORENSICS', name: 'Scientific Division Admin (Assistant Director)', description: 'Ballistics, DNA, Cyber Lab Division Head', clearance_required: 'SECRET' },
+    { id: 'FOR_L4_MOBILE', level_number: 4, body_id: 'FORENSICS', name: 'District Mobile Unit Admin (SSO)', description: 'Mobile Forensic Scene-of-Crime Unit Admin', clearance_required: 'CONFIDENTIAL' },
+  ];
+
+  for (const al of adminLevels) {
+    await query(`
+      INSERT INTO admin_levels (id, level_number, body_id, name, description, clearance_required, can_manage_subordinates)
+      VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+      ON CONFLICT (id) DO UPDATE
+      SET level_number = EXCLUDED.level_number, body_id = EXCLUDED.body_id, name = EXCLUDED.name,
+          description = EXCLUDED.description, clearance_required = EXCLUDED.clearance_required;
+    `, [al.id, al.level_number, al.body_id, al.name, al.description, al.clearance_required]);
+  }
+
+  // 1e. Seed Institutional Organization Tags
+  console.log('Seeding institutional organization tags...');
+  const tags = [
+    { name: 'Apex Command', slug: 'apex-command', color: 'emerald', category: 'OFFICE', description: 'State-level sovereign apex administrative headquarters' },
+    { name: 'Metropolitan Commissionerate', slug: 'metro-commissionerate', color: 'blue', category: 'JURISDICTION', description: 'High-density urban police commissionerate command' },
+    { name: 'Border Jurisdiction', slug: 'border-jurisdiction', color: 'rose', category: 'SECURITY', description: 'State or coastal border security operational outpost' },
+    { name: 'Sensitive / High Priority', slug: 'sensitive-priority', color: 'amber', category: 'SECURITY', description: 'High sensitivity jurisdiction or critical evidence facility' },
+    { name: 'Cyber Crime Unit', slug: 'cyber-crime', color: 'purple', category: 'SPECIALTY', description: 'Specialized digital forensics and cyber crime cell' },
+    { name: 'Forensic Ballistics Lab', slug: 'forensic-ballistics', color: 'purple', category: 'SPECIALTY', description: 'Advanced firearms and ballistics examination facility' },
+    { name: 'District Headquarters', slug: 'district-hq', color: 'slate', category: 'OFFICE', description: 'District superintendent / session court principal office' },
+    { name: 'Scene of Crime Mobile', slug: 'scene-of-crime-mobile', color: 'amber', category: 'OPERATIONAL', description: 'Rapid field deployment unit for physical evidence retrieval' },
+  ];
+
+  for (const tag of tags) {
+    await query(`
+      INSERT INTO organization_tags (name, slug, color, category, description)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (slug) DO UPDATE
+      SET name = EXCLUDED.name, color = EXCLUDED.color, category = EXCLUDED.category, description = EXCLUDED.description;
+    `, [tag.name, tag.slug, tag.color, tag.category, tag.description]);
   }
 
   // Clear existing nodes to avoid stale merged hierarchy
@@ -718,6 +768,41 @@ export async function seedDatabase(): Promise<void> {
   `, [fslApexId]);
 
 
+  // Batch map admin_level_id based on node level and body
+  await query(`
+    UPDATE organization_nodes
+    SET admin_level_id = CASE
+      WHEN body_id = 'MASTER' THEN 'MASTER_L1_APEX'
+      WHEN body_id = 'POLICE' AND level = 1 THEN 'POL_L1_DGP'
+      WHEN body_id = 'POLICE' AND level = 2 THEN 'POL_L2_COMM'
+      WHEN body_id = 'POLICE' AND level = 3 THEN 'POL_L3_DIV'
+      WHEN body_id = 'POLICE' AND level >= 4 THEN 'POL_L4_STATION'
+      WHEN body_id = 'JUDICIARY' AND level = 1 THEN 'JUD_L1_HIGH_COURT'
+      WHEN body_id = 'JUDICIARY' AND level = 2 THEN 'JUD_L2_DISTRICT'
+      WHEN body_id = 'JUDICIARY' AND level = 3 THEN 'JUD_L3_SUBDIV'
+      WHEN body_id = 'JUDICIARY' AND level >= 4 THEN 'JUD_L4_MAGISTRATE'
+      WHEN body_id = 'FORENSICS' AND level = 1 THEN 'FOR_L1_DIRECTOR'
+      WHEN body_id = 'FORENSICS' AND level = 2 THEN 'FOR_L2_REGIONAL'
+      WHEN body_id = 'FORENSICS' AND level = 3 THEN 'FOR_L3_DIVISION'
+      WHEN body_id = 'FORENSICS' AND level >= 4 THEN 'FOR_L4_MOBILE'
+      ELSE NULL
+    END;
+  `);
+
+  // Attach sample tags to prominent offices
+  await query(`
+    INSERT INTO node_tags (node_id, tag_id)
+    SELECT n.id, t.id
+    FROM organization_nodes n, organization_tags t
+    WHERE (n.code = 'GUJ-MASTER-ROOT' AND t.slug = 'apex-command')
+       OR (n.code = 'GUJ-POL-STATE-HQ' AND t.slug = 'apex-command')
+       OR (n.code = 'GUJ-POL-COMM-AHMEDABAD' AND t.slug = 'metro-commissionerate')
+       OR (n.code = 'GUJ-POL-AMD-NAVRANGPURA' AND t.slug = 'metro-commissionerate')
+       OR (n.code = 'GUJ-FSL-APEX' AND t.slug = 'apex-command')
+       OR (n.code = 'GUJ-JUD-HIGH-COURT' AND t.slug = 'apex-command')
+    ON CONFLICT DO NOTHING;
+  `);
+
   // =========================================================================
   // 3. System Permissions
   // =========================================================================
@@ -1081,13 +1166,14 @@ export async function seedDatabase(): Promise<void> {
 
   const masterUserRes = await query(`
     INSERT INTO users (
-      username, email, display_name, badge_number, phone_number,
+      username, email, display_name, government_id, badge_number, phone_number,
       designation, department_wing, clearance_level, is_layer_admin,
       password_hash, primary_role_id, primary_organization_id
     ) VALUES (
       'master_admin',
       'master.admin@gujarat.gov.in',
       'State Security & Identity Administrator',
+      'GJ-GOV-000001',
       'MST-001',
       '+91-79-23250001',
       'Chief Technical Secretary & Apex Administrator',

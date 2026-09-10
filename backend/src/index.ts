@@ -1,7 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import { rateLimit } from 'express-rate-limit';
 import path from 'path';
 import dotenv from 'dotenv';
 import { initDatabase } from './services/db';
@@ -22,22 +21,11 @@ import delegationRoutes from './routes/delegations';
 import searchRoutes from './routes/search';
 import auditRoutes from './routes/audit';
 import systemRoutes from './routes/system';
+import ticketRoutes from './routes/tickets';
 import ledgerRoutes from './routes/ledger';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '5000', 10);
-const isProd = process.env.NODE_ENV === 'production';
-
-// Trust only the loopback proxy (Vite dev proxy / local reverse proxy) so that
-// req.ip reflects the real client and the rate limiters key correctly.
-app.set('trust proxy', 'loopback');
-
-// Explicit frontend origin allow-list -- never reflect an arbitrary Origin while
-// also sending credentials.
-const ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173,http://127.0.0.1:5173')
-  .split(',')
-  .map((o) => o.trim())
-  .filter(Boolean);
 
 // Basic Cookie Parser Middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -54,35 +42,15 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// Security Headers -- real CSP baseline instead of disabling it.
+// Security Headers
 app.use(helmet({
-  contentSecurityPolicy: {
-    useDefaults: true,
-    directives: {
-      'default-src': ["'self'"],
-      'script-src': ["'self'"],
-      'style-src': ["'self'", "'unsafe-inline'"], // Tailwind injects inline styles
-      'img-src': ["'self'", 'data:'],
-      'connect-src': ["'self'"],
-      'object-src': ["'none'"],
-      'frame-ancestors': ["'none'"],
-      'base-uri': ["'self'"],
-      'form-action': ["'self'"],
-      ...(isProd ? { 'upgrade-insecure-requests': [] } : {}),
-    },
-  },
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
-  hsts: isProd ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false,
-  referrerPolicy: { policy: 'no-referrer' },
 }));
 
-// CORS -- explicit allow-list only.
+// CORS Configuration
 app.use(cors({
-  origin(origin, callback) {
-    // Non-browser clients / same-origin requests send no Origin header.
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    return callback(new Error('Origin not allowed by CORS policy'));
-  },
+  origin: true, // Allow frontend dev origin
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
@@ -90,18 +58,6 @@ app.use(cors({
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-// Global API rate limiter (auth endpoints have their own stricter limiter).
-app.use('/api', rateLimit({
-  windowMs: 60 * 1000,
-  limit: 300,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  handler: (_req, res) => res.status(429).json({
-    error: 'Rate Limit Exceeded',
-    message: 'Too many requests. Please slow down.',
-  }),
-}));
 
 // Health Check
 app.get('/api/health', (req, res) => {
@@ -128,6 +84,7 @@ app.use('/api/delegations', delegationRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/audit', auditRoutes);
 app.use('/api/system', systemRoutes);
+app.use('/api/tickets', ticketRoutes);
 app.use('/api/ledger', ledgerRoutes);
 
 // Global Error Handler (Sanitizes internal server details)
@@ -149,14 +106,49 @@ async function start() {
   console.log('Initializing database schema...');
   await initDatabase();
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`================================================================`);
     console.log(`  🛡️  SECURE MULTI-AGENCY PLATFORM BACKEND ONLINE`);
     console.log(`  🌐  Port: http://localhost:${PORT}`);
     console.log(`  🔒  Authorization Engine: ACTIVE`);
     console.log(`================================================================`);
   });
+
+  server.on('error', (err) => {
+    console.error('[LIFECYCLE] HTTP Server Error:', err);
+  });
+
+  // Keep event loop active
+  setInterval(() => {}, 1000 * 60 * 60);
 }
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception thrown:', err);
+});
+
+process.on('exit', (code) => {
+  console.log(`[LIFECYCLE] process.on('exit') called with code:`, code);
+});
+
+process.on('beforeExit', (code) => {
+  console.log(`[LIFECYCLE] process.on('beforeExit') called with code:`, code);
+});
+
+process.on('SIGTERM', () => {
+  console.log(`[LIFECYCLE] Received SIGTERM signal`);
+});
+
+process.on('SIGINT', () => {
+  console.log(`[LIFECYCLE] Received SIGINT signal`);
+});
+
+process.on('SIGHUP', () => {
+  console.log(`[LIFECYCLE] Received SIGHUP signal`);
+});
 
 start().catch((err) => {
   console.error('Failed to start backend server:', err);

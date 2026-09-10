@@ -24,7 +24,7 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
     LEFT JOIN delegated_access da ON c.id = da.case_id AND da.granted_to_user_id = $1 AND da.status = 'ACTIVE' AND NOW() BETWEEN da.starts_at AND da.expires_at
     WHERE (
       -- Master Admin has visibility
-      $2 IN ('MASTER_ADMIN', 'SYSTEM_MASTER_ADMIN')
+      $2 = 'MASTER_ADMIN'
       -- Originating agency in user's vertical subtree
       OR o.hierarchy_path = $3 OR o.hierarchy_path LIKE $3 || '.%'
       -- Cross-agency participation grant

@@ -2,31 +2,17 @@ import { Pool, PoolClient } from 'pg';
 import path from 'path';
 import dotenv from 'dotenv';
 
-// Project-root .env (backend/src/services -> ../../../.env, and the same from
-// backend/dist/services after compilation). Loading it here as well as in
-// index.ts means standalone scripts (seed, tests) that import this module
-// directly still get the real configuration.
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
-
-// Fail fast rather than fall back to a hardcoded credential. A missing DB
-// password in any environment is a deployment error, not something to paper over.
-if (!process.env.DB_PASSWORD) {
-  throw new Error(
-    'DB_PASSWORD is not set. Refusing to start with an implicit/blank database credential. ' +
-    'Set DB_PASSWORD in the environment (see .env.example).'
-  );
-}
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 export const pool = new Pool({
   host: process.env.DB_HOST || '127.0.0.1',
   port: parseInt(process.env.DB_PORT || '5432', 10),
   database: process.env.DB_NAME || 'casevault',
   user: process.env.DB_USER || 'casevault',
-  password: process.env.DB_PASSWORD,
+  password: process.env.DB_PASSWORD || 't0rr3rdbmz7!P9xw',
   max: 25,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
-  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
 });
 
 export async function query(text: string, params?: any[]) {
@@ -40,12 +26,9 @@ export async function query(text: string, params?: any[]) {
 }
 
 /**
- * Runs `fn` inside a single database transaction. The callback receives a
- * transaction-scoped client whose `.query()` participates in the transaction;
- * any thrown error triggers ROLLBACK, otherwise COMMIT. Use this for every
- * multi-statement workflow (case + FIR + timeline + audit, evidence custody
- * transfer, user provisioning, document storage) so a partial failure can
- * never leave an evidentiary record without its audit/ledger entry.
+ * Execute a unit of work inside an explicit ACID transaction. A single client
+ * is checked out from the pool, `SET search_path` and `BEGIN` are issued, and
+ * any thrown error triggers ROLLBACK, otherwise COMMIT.
  */
 export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
@@ -124,11 +107,47 @@ export async function initDatabase(): Promise<void> {
       ALTER TABLE organization_nodes ADD COLUMN IF NOT EXISTS body_id VARCHAR(32) REFERENCES organization_bodies(id);
       ALTER TABLE organization_nodes ADD COLUMN IF NOT EXISTS node_type_id VARCHAR(64);
       ALTER TABLE organization_nodes ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}';
+      ALTER TABLE organization_nodes ADD COLUMN IF NOT EXISTS admin_level_id VARCHAR(64);
 
       CREATE INDEX IF NOT EXISTS idx_org_nodes_parent ON organization_nodes(parent_id);
       CREATE INDEX IF NOT EXISTS idx_org_nodes_body ON organization_nodes(body_id);
       CREATE INDEX IF NOT EXISTS idx_org_nodes_branch ON organization_nodes(agency_branch);
       CREATE INDEX IF NOT EXISTS idx_org_nodes_path ON organization_nodes(hierarchy_path);
+      CREATE INDEX IF NOT EXISTS idx_org_nodes_admin_level ON organization_nodes(admin_level_id);
+
+      -- 2b. Admin Levels (Administrative hierarchy tiers 1 to 5)
+      CREATE TABLE IF NOT EXISTS admin_levels (
+        id VARCHAR(64) PRIMARY KEY,
+        level_number INTEGER NOT NULL,
+        body_id VARCHAR(32) REFERENCES organization_bodies(id),
+        name VARCHAR(128) NOT NULL,
+        description TEXT,
+        clearance_required VARCHAR(32) DEFAULT 'SECRET',
+        can_manage_subordinates BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      -- 2c. Organization Tags & Node Tags
+      CREATE TABLE IF NOT EXISTS organization_tags (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(64) UNIQUE NOT NULL,
+        slug VARCHAR(64) UNIQUE NOT NULL,
+        color VARCHAR(32) DEFAULT 'slate',
+        body_id VARCHAR(32),
+        category VARCHAR(64) DEFAULT 'OFFICE',
+        description TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS node_tags (
+        node_id UUID REFERENCES organization_nodes(id) ON DELETE CASCADE,
+        tag_id UUID REFERENCES organization_tags(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (node_id, tag_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_node_tags_node ON node_tags(node_id);
+      CREATE INDEX IF NOT EXISTS idx_node_tags_tag ON node_tags(tag_id);
 
       -- 3. Roles
       CREATE TABLE IF NOT EXISTS roles (
@@ -184,11 +203,15 @@ export async function initDatabase(): Promise<void> {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS department_wing VARCHAR(128);
       ALTER TABLE users ADD COLUMN IF NOT EXISTS clearance_level VARCHAR(32) DEFAULT 'CONFIDENTIAL';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS is_layer_admin BOOLEAN DEFAULT FALSE;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS government_id VARCHAR(64);
+
+      UPDATE users SET government_id = badge_number WHERE government_id IS NULL AND badge_number IS NOT NULL;
 
       CREATE INDEX IF NOT EXISTS idx_users_org ON users(primary_organization_id);
       CREATE INDEX IF NOT EXISTS idx_users_role ON users(primary_role_id);
       CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
       CREATE INDEX IF NOT EXISTS idx_users_layer_admin ON users(is_layer_admin);
+      CREATE INDEX IF NOT EXISTS idx_users_government_id ON users(government_id);
 
       -- 6b. User Roles (Reusable Role Assignment)
       CREATE TABLE IF NOT EXISTS user_roles (
@@ -225,6 +248,51 @@ export async function initDatabase(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_expires ON user_sessions(expires_at);
+
+      -- 7b. Passwordless Login OTPs
+      CREATE TABLE IF NOT EXISTS login_otps (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email VARCHAR(256) NOT NULL,
+        otp_code VARCHAR(16) NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        consumed BOOLEAN DEFAULT FALSE,
+        ip_address VARCHAR(45),
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_login_otps_email ON login_otps(email);
+      CREATE INDEX IF NOT EXISTS idx_login_otps_expires ON login_otps(expires_at);
+
+      -- 7c. Compulsory LEA Update Tickets
+      CREATE TABLE IF NOT EXISTS update_tickets (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        ticket_number VARCHAR(64) UNIQUE NOT NULL,
+        requester_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        requester_email VARCHAR(256) NOT NULL,
+        requester_government_id VARCHAR(64),
+        requester_name VARCHAR(128),
+        organization_id UUID REFERENCES organization_nodes(id) ON DELETE SET NULL,
+        body_id VARCHAR(32) REFERENCES organization_bodies(id),
+        action_type VARCHAR(64) NOT NULL, -- 'CREATE_OFFICE', 'UPDATE_OFFICE', 'CREATE_USER', 'UPDATE_USER', 'UPDATE_USER_STATUS', 'DELETE_USER', 'CREATE_OFFICE_POSITION'
+        target_resource_type VARCHAR(64) NOT NULL, -- 'ORGANIZATION_NODE', 'USER', 'OFFICE_POSITION'
+        target_resource_id VARCHAR(128),
+        justification TEXT NOT NULL,
+        payload JSONB NOT NULL DEFAULT '{}',
+        before_state JSONB DEFAULT '{}',
+        otp_code VARCHAR(16),
+        otp_expires_at TIMESTAMPTZ,
+        status VARCHAR(32) NOT NULL DEFAULT 'PENDING_OTP', -- 'PENDING_OTP', 'VERIFIED', 'EXECUTED', 'REJECTED'
+        verified_at TIMESTAMPTZ,
+        executed_at TIMESTAMPTZ,
+        ip_address VARCHAR(45),
+        user_agent TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_update_tickets_req ON update_tickets(requester_user_id);
+      CREATE INDEX IF NOT EXISTS idx_update_tickets_status ON update_tickets(status);
+      CREATE INDEX IF NOT EXISTS idx_update_tickets_number ON update_tickets(ticket_number);
 
       -- 8. Cases (Central Workspace Root)
       CREATE TABLE IF NOT EXISTS cases (
@@ -610,8 +678,6 @@ export async function initDatabase(): Promise<void> {
       -- This is the database-permission-independent tamper barrier: the ledger
       -- anchors every audit row, so audit-trail tampering is cryptographically
       -- detectable via /api/ledger/verify regardless of audit_logs table grants.
-      -- (audit_logs itself keeps its ON DELETE SET NULL FKs for re-seed/reset;
-      --  production immutability there is a least-privilege runtime role -- see SECURITY.md.)
       CREATE OR REPLACE FUNCTION investigation.reject_mutation() RETURNS trigger AS $reject$
       BEGIN
         RAISE EXCEPTION 'append-only table: % on % is not permitted', TG_OP, TG_TABLE_NAME
