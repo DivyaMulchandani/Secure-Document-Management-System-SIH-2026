@@ -20,6 +20,7 @@ export const Evidence: React.FC = () => {
   const [showCustodyModal, setShowCustodyModal] = useState(false);
   const [selectedEvidence, setSelectedEvidence] = useState<any>(null);
   const [custodyHistory, setCustodyHistory] = useState<any[]>([]);
+  const [custodyIntegrity, setCustodyIntegrity] = useState<any>(null);
 
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [transferForm, setTransferForm] = useState({
@@ -67,6 +68,7 @@ export const Evidence: React.FC = () => {
     try {
       const res = await api.get<any>(`/evidence/${ev.id}/custody`);
       setCustodyHistory(res.custodyHistory || []);
+      setCustodyIntegrity(res.integrity || null);
       setShowCustodyModal(true);
     } catch (err: any) {
       alert(err.message || 'Failed to fetch chain of custody');
@@ -242,6 +244,14 @@ export const Evidence: React.FC = () => {
               <button onClick={() => setShowCustodyModal(false)} className="text-muted-text hover:text-primary-text">✕</button>
             </div>
 
+            {custodyIntegrity && (
+              <div className={`px-3 py-2 rounded border text-[11px] font-mono flex items-center justify-between ${
+                custodyIntegrity.chainVerified ? 'bg-success-light border-success/30 text-success' : 'bg-danger-light border-danger/30 text-danger'
+              }`}>
+                <span>🔗 {custodyIntegrity.chainVerified ? 'Hash Chain Verified' : `Chain Broken at block #${custodyIntegrity.ledgerBrokenAt}`}</span>
+                <span>{custodyIntegrity.anchoredTransitions}/{custodyIntegrity.totalTransitions} transitions anchored</span>
+              </div>
+            )}
             <div className="space-y-3">
               <h4 className="text-xs font-bold uppercase font-mono text-muted-text tracking-wider">
                 Cryptographic Chain of Custody History

@@ -6,6 +6,57 @@ import { appendLedgerBlock, verifyLedger } from '../services/ledger';
 
 const router = Router();
 
+// GET /api/evidence (cross-case collection, scoped like /api/cases)
+// This is what the Evidence page's fetchEvidence() actually calls -- without
+// this route the page 404s and the ledger-backed custody integrity below is
+// unreachable from the UI (see EVD-001 in the testing report).
+router.get('/', requireAuth, async (req: Request, res: Response) => {
+  const user = req.userSession!;
+  const { category, status, search } = req.query;
+
+  let queryText = `
+    SELECT DISTINCT e.*,
+           u_col.display_name as collected_by_name,
+           u_cust.display_name as current_custodian_name,
+           o.name as current_organization_name, o.code as current_organization_code,
+           c.fir_number, c.title as case_title
+    FROM evidence e
+    JOIN cases c ON e.case_id = c.id
+    JOIN organization_nodes oc ON c.originating_organization_id = oc.id
+    JOIN users u_col ON e.collected_by_id = u_col.id
+    JOIN users u_cust ON e.current_custodian_id = u_cust.id
+    JOIN organization_nodes o ON e.current_organization_id = o.id
+    LEFT JOIN case_agency_participation cap ON c.id = cap.case_id
+    LEFT JOIN delegated_access da ON c.id = da.case_id AND da.granted_to_user_id = $1 AND da.status = 'ACTIVE' AND NOW() BETWEEN da.starts_at AND da.expires_at
+    WHERE (
+      $2 IN ('MASTER_ADMIN', 'SYSTEM_MASTER_ADMIN')
+      OR oc.hierarchy_path = $3 OR oc.hierarchy_path LIKE $3 || '.%'
+      OR o.hierarchy_path = $3 OR o.hierarchy_path LIKE $3 || '.%'
+      OR cap.organization_id = $4
+      OR da.id IS NOT NULL
+    )
+  `;
+  const params: any[] = [user.userId, user.roleId, user.organizationPath, user.organizationId];
+
+  if (category) {
+    params.push(category);
+    queryText += ` AND e.category = $${params.length}`;
+  }
+  if (status) {
+    params.push(status);
+    queryText += ` AND e.status = $${params.length}`;
+  }
+  if (search) {
+    params.push(`%${search}%`);
+    queryText += ` AND (e.evidence_tag ILIKE $${params.length} OR e.description ILIKE $${params.length} OR c.fir_number ILIKE $${params.length})`;
+  }
+
+  queryText += ` ORDER BY e.collected_at DESC LIMIT 500;`;
+
+  const evRes = await query(queryText, params);
+  return res.json({ evidence: evRes.rows });
+});
+
 // GET /api/cases/:id/evidence
 router.get('/:id/evidence', requireAuth, async (req: Request, res: Response) => {
   const user = req.userSession!;
@@ -64,42 +115,72 @@ router.post('/:id/evidence', requireAuth, async (req: Request, res: Response) =>
   }
 
   try {
-    const evRes = await query(`
-      INSERT INTO evidence (
-        case_id, evidence_tag, category, description, collected_at, collected_by_id,
-        collection_location, current_custodian_id, current_organization_id, storage_location,
-        seal_status, status
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $6, $8, $9, $10, 'IN_POLICE_CUSTODY'
-      ) RETURNING *;
-    `, [
-      caseId, evidenceTag, category, description, collectedAt || new Date(),
-      user.userId, collectionLocation, user.organizationId, storageLocation, sealStatus || 'INTACT_AND_VERIFIED'
-    ]);
+    const seal = sealStatus || 'INTACT_AND_VERIFIED';
 
-    const ev = evRes.rows[0];
+    // Evidence row + genesis custody event + timeline + audit + ledger anchor
+    // all commit atomically -- an evidence item can never exist without its
+    // chain-of-custody genesis block anchored on the integrity ledger.
+    const ev = await withTransaction(async (tx) => {
+      const evRes = await tx.query(`
+        INSERT INTO evidence (
+          case_id, evidence_tag, category, description, collected_at, collected_by_id,
+          collection_location, current_custodian_id, current_organization_id, storage_location,
+          seal_status, status
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $6, $8, $9, $10, 'IN_POLICE_CUSTODY'
+        ) RETURNING *;
+      `, [
+        caseId, evidenceTag, category, description, collectedAt || new Date(),
+        user.userId, collectionLocation, user.organizationId, storageLocation, seal
+      ]);
 
-    // Record initial chain-of-custody event (COLLECTION)
-    await query(`
-      INSERT INTO evidence_custody_events (
-        evidence_id, timestamp, from_user_id, from_organization_id, to_user_id, to_organization_id,
-        action_type, reason, seal_condition
-      ) VALUES (
-        $1, NOW(), $2, $3, $2, $3, 'COLLECTION', 'Initial seizure and bagging at crime scene', $4
-      );
-    `, [ev.id, user.userId, user.organizationId, sealStatus || 'INTACT_AND_VERIFIED']);
+      const created = evRes.rows[0];
 
-    // Timeline event
-    await query(`
-      INSERT INTO case_timeline (case_id, event_type, title, description, actor_id, organization_id, entity_type, entity_id)
-      VALUES ($1, 'EVIDENCE_COLLECTED', 'Physical Evidence Registered', $2, $3, $4, 'EVIDENCE', $5);
-    `, [caseId, `Tag: ${evidenceTag} (${category}) collected by ${user.displayName}`, user.userId, user.organizationId, ev.id]);
+      // Record initial chain-of-custody event (COLLECTION)
+      const custodyRes = await tx.query(`
+        INSERT INTO evidence_custody_events (
+          evidence_id, timestamp, from_user_id, from_organization_id, to_user_id, to_organization_id,
+          action_type, reason, seal_condition
+        ) VALUES (
+          $1, NOW(), $2, $3, $2, $3, 'COLLECTION', 'Initial seizure and bagging at crime scene', $4
+        ) RETURNING id, timestamp;
+      `, [created.id, user.userId, user.organizationId, seal]);
 
-    // Audit log
-    await query(`
-      INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, case_id, result, ip_address, user_agent, after_value)
-      VALUES ($1, $2, 'EVIDENCE_CREATED', 'EVIDENCE', $3, $4, 'ALLOW', $5, $6, $7::jsonb);
-    `, [user.userId, user.organizationId, ev.id, caseId, req.ip, req.headers['user-agent'], JSON.stringify({ tag: evidenceTag, category })]);
+      // Timeline event
+      await tx.query(`
+        INSERT INTO case_timeline (case_id, event_type, title, description, actor_id, organization_id, entity_type, entity_id)
+        VALUES ($1, 'EVIDENCE_COLLECTED', 'Physical Evidence Registered', $2, $3, $4, 'EVIDENCE', $5);
+      `, [caseId, `Tag: ${evidenceTag} (${category}) collected by ${user.displayName}`, user.userId, user.organizationId, created.id]);
+
+      // Audit log
+      await tx.query(`
+        INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, case_id, result, ip_address, user_agent, after_value)
+        VALUES ($1, $2, 'EVIDENCE_CREATED', 'EVIDENCE', $3, $4, 'ALLOW', $5, $6, $7::jsonb);
+      `, [user.userId, user.organizationId, created.id, caseId, req.ip, req.headers['user-agent'], JSON.stringify({ tag: evidenceTag, category })]);
+
+      // Anchor the genesis custody block -- without this, a freshly collected
+      // item shows zero chain-of-custody coverage until its first transfer.
+      await appendLedgerBlock(tx, {
+        eventType: 'EVIDENCE_CUSTODY',
+        refTable: 'evidence_custody_events',
+        refId: custodyRes.rows[0].id,
+        caseId: String(caseId),
+        orgId: user.organizationId,
+        bodyId: user.bodyId || user.agencyBranch,
+        payload: {
+          evidenceId: created.id,
+          evidenceTag,
+          actionType: 'COLLECTION',
+          fromOrg: user.organizationId,
+          toOrg: user.organizationId,
+          actorId: user.userId,
+          sealCondition: seal,
+          at: new Date(custodyRes.rows[0].timestamp).toISOString(),
+        },
+      });
+
+      return created;
+    });
 
     return res.status(201).json({ success: true, evidence: ev });
   } catch (err: any) {
