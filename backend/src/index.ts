@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import { rateLimit } from 'express-rate-limit';
 import path from 'path';
 import dotenv from 'dotenv';
 import { initDatabase } from './services/db';
@@ -26,6 +27,18 @@ import ledgerRoutes from './routes/ledger';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '5000', 10);
+const isProd = process.env.NODE_ENV === 'production';
+
+// Trust only the loopback proxy (Vite dev proxy / local reverse proxy) so
+// req.ip reflects the real client and the rate limiters key correctly.
+app.set('trust proxy', 'loopback');
+
+// Explicit frontend origin allow-list -- never reflect an arbitrary Origin
+// while also sending credentials.
+const ALLOWED_ORIGINS = (process.env.FRONTEND_ORIGIN || 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
 
 // Basic Cookie Parser Middleware
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -42,15 +55,36 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
-// Security Headers
+// Security Headers -- real CSP baseline instead of disabling it.
 app.use(helmet({
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      'default-src': ["'self'"],
+      'script-src': ["'self'"],
+      'style-src': ["'self'", "'unsafe-inline'"], // Tailwind injects inline styles
+      'img-src': ["'self'", 'data:'],
+      'connect-src': ["'self'"],
+      'object-src': ["'none'"],
+      'frame-ancestors': ["'none'"],
+      'base-uri': ["'self'"],
+      'form-action': ["'self'"],
+      ...(isProd ? { 'upgrade-insecure-requests': [] } : {}),
+    },
+  },
   crossOriginEmbedderPolicy: false,
+  hsts: isProd ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false,
+  referrerPolicy: { policy: 'no-referrer' },
 }));
 
-// CORS Configuration
+// CORS -- explicit allow-list only, never a reflected wildcard with credentials.
 app.use(cors({
-  origin: true, // Allow frontend dev origin
+  origin(origin, callback) {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    const err: any = new Error('Origin not allowed by CORS policy');
+    err.status = 403;
+    return callback(err);
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
@@ -58,6 +92,18 @@ app.use(cors({
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Global API rate limiter (auth endpoints carry their own stricter one).
+app.use('/api', rateLimit({
+  windowMs: 60 * 1000,
+  limit: 300,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({
+    error: 'Rate Limit Exceeded',
+    message: 'Too many requests. Please slow down.',
+  }),
+}));
 
 // Health Check
 app.get('/api/health', (req, res) => {
@@ -150,9 +196,20 @@ process.on('SIGHUP', () => {
   console.log(`[LIFECYCLE] Received SIGHUP signal`);
 });
 
-start().catch((err) => {
-  console.error('Failed to start backend server:', err);
-  process.exit(1);
-});
+// Only self-start when this file is run directly (`tsx src/index.ts`,
+// `node dist/index.js`). When another module `import`s `app` (every test
+// suite does this) that import must NOT have the side effect of booting a
+// second live server + a second concurrent initDatabase() DDL run racing
+// the importer's own queries on the shared pool -- that race is exactly
+// what produced the reported 40P01 deadlock (one connection running
+// ALTER TABLE/CREATE INDEX while another ran a live login query). Callers
+// that need the schema ready (tests) call initDatabase()/seedDatabase()
+// themselves before issuing requests.
+if (require.main === module) {
+  start().catch((err) => {
+    console.error('Failed to start backend server:', err);
+    process.exit(1);
+  });
+}
 
 export default app;

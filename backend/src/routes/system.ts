@@ -10,8 +10,16 @@ router.get('/stats', requireAuth, async (req: Request, res: Response) => {
   const user = req.userSession!;
 
   // Scoped count queries
-  const isMaster = user.roleId === 'MASTER_ADMIN';
-  const orgFilter = isMaster ? '1=1' : `(o.hierarchy_path = '${user.organizationPath}' OR o.hierarchy_path LIKE '${user.organizationPath}.%')`;
+  const isMaster = user.roleId === 'MASTER_ADMIN' || user.roleId === 'SYSTEM_MASTER_ADMIN';
+
+  // Defence-in-depth: hierarchy_path is a dotted materialised path of org
+  // codes. Reject anything outside that alphabet before it is used to build
+  // SQL text (org codes are also strictly whitelisted at creation time).
+  if (!isMaster && !/^[A-Za-z0-9_.-]+$/.test(user.organizationPath || '')) {
+    return res.status(400).json({ error: 'Bad Request', message: 'Invalid organization scope on session.' });
+  }
+  const safePath = (user.organizationPath || '').replace(/'/g, '');
+  const orgFilter = isMaster ? '1=1' : `(o.hierarchy_path = '${safePath}' OR o.hierarchy_path LIKE '${safePath}.%')`;
 
   const [casesStats, evidenceStats, forensicStats, courtStats, userStats, orgStats, agencyStats] = await Promise.all([
     query(`

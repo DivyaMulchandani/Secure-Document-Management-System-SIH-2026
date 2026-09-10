@@ -103,7 +103,7 @@ export async function authenticateCredentials(username: string, plainPassword: s
 
     await query(`
       INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, result, ip_address, user_agent, after_value)
-      VALUES ($1, $2, 'LOGIN_FAILURE', 'USER', $3, 'DENY', $4, $5, json_build_object('attempt', $6, 'locked', $7));
+      VALUES ($1, $2, 'LOGIN_FAILURE', 'USER', $3, 'DENY', $4, $5, json_build_object('attempt', $6::int, 'locked', $7::boolean));
     `, [u.id, u.org_id, u.username, ip, userAgent, newCount, !!lockUntil]);
 
     return { success: false, error: 'Invalid credentials or account inaccessible', code: 401 };
@@ -255,6 +255,12 @@ export async function requestLoginOtp(identifier: string, ip: string, userAgent:
     ipAddress: ip,
   });
 
+  // The raw OTP is only ever echoed back to the client outside production --
+  // in production the code must travel exclusively through the SMTP channel.
+  // Handing it back in the HTTP response would let anyone who can reach the
+  // API (not just the mailbox owner) complete the "passwordless" login.
+  const isProd = process.env.NODE_ENV === 'production';
+
   return {
     success: true,
     message: mailResult.mode === 'LIVE_SMTP'
@@ -262,7 +268,7 @@ export async function requestLoginOtp(identifier: string, ip: string, userAgent:
       : `Verification code sent to registered government email ${maskEmail(u.email)}`,
     email: u.email,
     emailMasked: maskEmail(u.email),
-    devOtpPreview: otpCode,
+    devOtpPreview: isProd ? undefined : otpCode,
     deliveryMode: mailResult.mode,
   };
 }
@@ -319,7 +325,7 @@ export async function verifyLoginOtp(identifier: string, otpCode: string, ip: st
 
     await query(`
       INSERT INTO audit_logs (user_id, organization_id, action, resource_type, resource_id, result, ip_address, user_agent, after_value)
-      VALUES ($1, $2, 'LOGIN_FAILURE', 'USER', $3, 'DENY', $4, $5, json_build_object('reason', 'Invalid OTP', 'attempt', $6));
+      VALUES ($1, $2, 'LOGIN_FAILURE', 'USER', $3, 'DENY', $4, $5, json_build_object('reason', 'Invalid OTP', 'attempt', $6::int));
     `, [u.id, u.org_id, u.email, ip, userAgent, newCount]);
 
     return { success: false, error: 'Invalid or expired one-time verification code', code: 401 };

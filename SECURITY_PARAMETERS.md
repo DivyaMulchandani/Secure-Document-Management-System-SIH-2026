@@ -3,6 +3,50 @@
 Status of the controls from the Security & Blockchain Assessment Report.
 `DONE` = implemented in this codebase · `PARTIAL` = baseline in place, hardening noted · `TODO` = roadmap.
 
+## 2026-09-10 update
+
+A large amount of unrelated feature work (passwordless OTP login, compulsory update
+tickets, batch hierarchy import, admin levels/tags) landed on top of the Part A/C work
+below and reverted several of the fixes in the process (rate limit back to 250/IP,
+hardcoded DB password fallback, hardcoded creds in `Login.tsx`, `secure:false` /
+`sameSite:'lax'` cookies, `origin:true` CORS, CSP disabled, `.env` dotenv path bug).
+All of Part A/C has been **re-applied** against the current code, extended to cover the
+new OTP/login routes, and additionally:
+
+- **Fixed the reported `test:security` deadlock (40P01) at its root cause.**
+  `index.ts` self-started a full server + schema-init DDL run as a side effect of being
+  `import`-ed — every test file that imports `app` triggered a second, uncoordinated
+  `initDatabase()` racing the importer's own queries on the shared pool. Now guarded with
+  `if (require.main === module)`; test files that need the schema ready call
+  `initDatabase()`/`seedDatabase()` explicitly first (matches how `milestone1`/
+  `passwordless`/`batch` already worked, which is *why* they never hit this deadlock).
+- Session token in the login/verify-otp JSON body: kept (needed by the existing test
+  suites and any Bearer-auth API client) but the **browser SPA no longer stores or
+  forwards it** (`frontend/src/lib/api.ts` dropped the `localStorage` + `Authorization`
+  header path) — that was the actual XSS-exfiltration risk, not the field's presence.
+- `devOtpPreview` (the raw OTP) is only ever returned by the server outside
+  `NODE_ENV=production` — in prod the code travels exclusively via SMTP.
+- Found and fixed two **functional** bugs while verifying: (1) a wrong password on
+  `POST /auth/login` 500'd instead of returning 401, because
+  `json_build_object('attempt', $6, ...)` in the failed-login audit insert couldn't infer
+  `$6`'s type — this silently defeated the account-lockout counter; (2) CORS-rejected
+  requests fell through to a generic 500 instead of 403.
+- Reverted an over-strict "assigned role ⊆ actor's permissions" check after it broke a
+  legitimate feature: this platform deliberately lets a body admin (e.g. `POLICE_ADMIN`)
+  provision the reusable `NODE_ADMIN` role, which intentionally carries broader
+  cross-domain permissions for delegated nodes. Cross-agency boundary + subtree scope +
+  the `MASTER_ADMIN` provisioning block remain as the real anti-escalation gates.
+- Added the missing `GET /api/evidence` collection route (EVD-001 from the testing
+  report) and anchored evidence *creation* on the ledger (previously only transfers
+  were anchored) — see the Part C section below.
+- Verified end-to-end: `npm run build` (backend + frontend) clean, and
+  `test:milestone1` (17/17), `test:passwordless` (15/15), `test:batch` (7/7),
+  `test:ledger` (4/4) all pass. `test:security` still fails — cleanly, with a 401, no
+  deadlock — because its fixtures (`investigator_patel`, `officer_sharma`, etc.) predate
+  the current seed, which creates only `master_admin`. That's a pre-existing test-data
+  mismatch, not a security regression; fixing it means rewriting its setup to provision
+  those personas via the ticket flow, the way `milestone1.test.ts` does.
+
 ## Part A — confirmed findings
 
 | # | Finding | Status | Where |

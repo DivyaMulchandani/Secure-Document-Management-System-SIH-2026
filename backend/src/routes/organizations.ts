@@ -142,7 +142,10 @@ router.post('/office-positions', requireAuth, async (req: Request, res: Response
     return res.status(403).json({ error: 'Institutional Boundary Violation', message: 'Cannot add office positions to another sovereign agency body' });
   }
 
-  const cleanCode = code.toUpperCase().replace(/\s+/g, '_');
+  const cleanCode = String(code).toUpperCase().replace(/\s+/g, '_').replace(/[^A-Z0-9_-]/g, '');
+  if (!cleanCode) {
+    return res.status(400).json({ error: 'Validation Error', message: 'Position code must contain at least one alphanumeric character' });
+  }
   try {
     const newPos = await query(`
       INSERT INTO organization_node_types (id, code, name, description, body_id, is_active)

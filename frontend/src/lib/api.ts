@@ -11,37 +11,21 @@ export class ApiError extends Error {
   }
 }
 
-export const TOKEN_KEY = 'auth_session_token';
-
-export function getAuthToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-
-export function setAuthToken(token: string | null): void {
-  try {
-    if (token) {
-      localStorage.setItem(TOKEN_KEY, token);
-    } else {
-      localStorage.removeItem(TOKEN_KEY);
-    }
-  } catch {}
+// Session state lives ONLY in the HttpOnly cookie the backend sets on
+// login -- it is never exposed to JavaScript, so it can't be read by an XSS
+// payload or by any script on the page. Do not reintroduce a localStorage /
+// Authorization-header token path; that would hand a session-hijacking
+// primitive to anything that can execute JS on this origin.
+export function setAuthToken(_token: string | null): void {
+  // Intentional no-op, kept so older call sites don't need to change.
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = `${API_BASE}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
-  
+
   const headers = new Headers(options.headers || {});
   if (!headers.has('Content-Type') && !(options.body instanceof FormData)) {
     headers.set('Content-Type', 'application/json');
-  }
-
-  const token = getAuthToken();
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`);
   }
 
   const response = await fetch(url, {

@@ -1,7 +1,7 @@
 import assert from 'node:assert';
 import http from 'node:http';
 import app from '../backend/src/index';
-import { query } from '../backend/src/services/db';
+import { query, initDatabase } from '../backend/src/services/db';
 import { storeDocument } from '../backend/src/services/documents';
 
 const PORT = 5099;
@@ -90,6 +90,12 @@ async function runSecurityTests() {
   console.log('================================================================');
   console.log('  🛡️  STARTING INSTITUTIONAL SECURITY & ACCESS TEST SUITE');
   console.log('================================================================\n');
+
+  // index.ts no longer self-initializes the schema on import (that side
+  // effect is what raced this suite's own queries and produced the 40P01
+  // deadlock). Initialize explicitly, and wait for it to fully commit,
+  // before this listener -- and therefore any HTTP request -- can start.
+  await initDatabase();
 
   let server: http.Server;
   await new Promise<void>((resolve) => {

@@ -1,9 +1,12 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import { query } from '../services/db';
+import { query, withTransaction } from '../services/db';
 import { requireAuth } from '../services/auth';
 import { authorize } from '../services/authorization';
+import { appendLedgerBlock } from '../services/ledger';
+
+const BCRYPT_COST = 12;
 
 const router = Router();
 
@@ -57,7 +60,15 @@ router.get('/hierarchy-summary', requireAuth, async (req: Request, res: Response
   const user = req.userSession!;
 
   const isMaster = user.roleId === 'MASTER_ADMIN' || user.roleId === 'SYSTEM_MASTER_ADMIN';
-  const orgFilter = isMaster ? '1=1' : `(o.hierarchy_path = '${user.organizationPath}' OR o.hierarchy_path LIKE '${user.organizationPath}.%')`;
+
+  // Parameterised subtree filter -- never interpolate identity-derived
+  // values (organizationPath originates from an org "code" field) into SQL text.
+  const params: any[] = [];
+  let orgFilter = '1=1';
+  if (!isMaster) {
+    params.push(user.organizationPath);
+    orgFilter = `(o.hierarchy_path = $1 OR o.hierarchy_path LIKE $1 || '.%')`;
+  }
 
   const summaryRes = await query(`
     SELECT o.id, o.name, o.code, o.agency_branch, o.level, o.parent_id, o.hierarchy_path, o.body_id,
@@ -68,7 +79,7 @@ router.get('/hierarchy-summary', requireAuth, async (req: Request, res: Response
     WHERE ${orgFilter}
     GROUP BY o.id, o.name, o.code, o.agency_branch, o.level, o.parent_id, o.hierarchy_path, o.body_id
     ORDER BY o.agency_branch ASC, o.level ASC, o.name ASC;
-  `);
+  `, params);
 
   return res.json({ summary: summaryRes.rows });
 });
@@ -213,7 +224,7 @@ router.post('/body-admin', requireAuth, async (req: Request, res: Response) => {
   const effectivePassword = password || 'Gov@Secure2026!';
 
   try {
-    const passwordHash = await bcrypt.hash(effectivePassword, 10);
+    const passwordHash = await bcrypt.hash(effectivePassword, BCRYPT_COST);
     const newAdmin = await query(`
       INSERT INTO users (
         username, email, display_name, badge_number, government_id, phone_number,
@@ -376,6 +387,14 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
         message: 'Only a Master Administrator may provision another Master Administrator.',
       });
     }
+
+    // NOTE: a strict "assigned role's permissions must be a subset of the
+    // creator's own" rule was tried here and reverted -- this platform
+    // deliberately allows a body admin (e.g. POLICE_ADMIN) to provision the
+    // reusable NODE_ADMIN role, which intentionally carries broader
+    // cross-domain (forensic/court) permissions for delegated nodes. Agency
+    // boundary + subtree scope + the MASTER_ADMIN block above are the actual
+    // anti-escalation gates for this role model.
   }
 
   // Base permission check
@@ -390,56 +409,81 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
 
   try {
     const isNewUserAdmin = !!isLayerAdmin || roleId.includes('ADMIN');
-    const passwordHash = await bcrypt.hash(effectivePassword, 10);
-    const newU = await query(`
-      INSERT INTO users (
-        username, email, display_name, badge_number, government_id, phone_number,
-        designation, department_wing, clearance_level, is_layer_admin,
-        password_hash, primary_role_id, primary_organization_id
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-      RETURNING id, username, email, display_name, badge_number, government_id, phone_number,
-                designation, department_wing, clearance_level, is_layer_admin,
-                status, primary_role_id, primary_organization_id, created_at;
-    `, [
-      effectiveUsername, email, displayName, effectiveBadge, effectiveGovId, phoneNumber || null,
-      designation || null, departmentWing || null, clearanceLevel || 'CONFIDENTIAL', isNewUserAdmin,
-      passwordHash, roleId, organizationId
-    ]);
+    const passwordHash = await bcrypt.hash(effectivePassword, BCRYPT_COST);
 
-    const newUserId = newU.rows[0].id;
+    // User row + role grant + admin scope + audit + ledger anchor all commit
+    // atomically -- a provisioned account can never exist without its audit trail.
+    const createdUser = await withTransaction(async (tx) => {
+      const newU = await tx.query(`
+        INSERT INTO users (
+          username, email, display_name, badge_number, government_id, phone_number,
+          designation, department_wing, clearance_level, is_layer_admin,
+          password_hash, primary_role_id, primary_organization_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        RETURNING id, username, email, display_name, badge_number, government_id, phone_number,
+                  designation, department_wing, clearance_level, is_layer_admin,
+                  status, primary_role_id, primary_organization_id, created_at;
+      `, [
+        effectiveUsername, email, displayName, effectiveBadge, effectiveGovId, phoneNumber || null,
+        designation || null, departmentWing || null, clearanceLevel || 'CONFIDENTIAL', isNewUserAdmin,
+        passwordHash, roleId, organizationId
+      ]);
 
-    // Insert user_roles
-    await query(`
-      INSERT INTO user_roles (user_id, role_id)
-      VALUES ($1, $2)
-      ON CONFLICT DO NOTHING;
-    `, [newUserId, roleId]);
+      const newUserId = newU.rows[0].id;
 
-    // Insert admin_scopes if user is an admin
-    if (isNewUserAdmin) {
-      await query(`
-        INSERT INTO admin_scopes (user_id, organization_node_id, scope_type)
-        VALUES ($1, $2, 'SUBTREE')
+      await tx.query(`
+        INSERT INTO user_roles (user_id, role_id)
+        VALUES ($1, $2)
         ON CONFLICT DO NOTHING;
-      `, [newUserId, organizationId]);
-    }
+      `, [newUserId, roleId]);
 
-    const auditAction = isNewUserAdmin ? 'ADMIN_CREATED' : 'USER_CREATED';
+      if (isNewUserAdmin) {
+        await tx.query(`
+          INSERT INTO admin_scopes (user_id, organization_node_id, scope_type)
+          VALUES ($1, $2, 'SUBTREE')
+          ON CONFLICT DO NOTHING;
+        `, [newUserId, organizationId]);
+      }
 
-    await query(`
-      INSERT INTO audit_logs (
-        user_id, actor_user_id, organization_id, organization_node_id, body_id,
-        action, resource_type, resource_id, result, ip_address, user_agent, metadata, after_value
-      )
-      VALUES ($1, $1, $2, $2, $3, $4, 'USER', $5, 'ALLOW', $6, $7, $8::jsonb, $8::jsonb);
-    `, [
-      user.userId, organizationId, targetOrg.body_id || targetOrg.agency_branch,
-      auditAction, newUserId, req.ip, req.headers['user-agent'],
-      JSON.stringify({ username, role: roleId, org: organizationId, is_layer_admin: isNewUserAdmin })
-    ]);
+      const auditAction = isNewUserAdmin ? 'ADMIN_CREATED' : 'USER_CREATED';
 
-    return res.status(201).json({ success: true, user: newU.rows[0] });
+      const auditRes = await tx.query(`
+        INSERT INTO audit_logs (
+          user_id, actor_user_id, organization_id, organization_node_id, body_id,
+          action, resource_type, resource_id, result, ip_address, user_agent, metadata, after_value
+        )
+        VALUES ($1, $1, $2, $2, $3, $4, 'USER', $5, 'ALLOW', $6, $7, $8::jsonb, $8::jsonb)
+        RETURNING id;
+      `, [
+        user.userId, organizationId, targetOrg.body_id || targetOrg.agency_branch,
+        auditAction, newUserId, req.ip, req.headers['user-agent'],
+        JSON.stringify({ username, role: roleId, org: organizationId, is_layer_admin: isNewUserAdmin })
+      ]);
+
+      // Anchor identity-provisioning events on the integrity ledger too --
+      // "who provisioned whom, with what role, when" is exactly the kind of
+      // record that should be tamper-evident in a multi-agency system.
+      await appendLedgerBlock(tx, {
+        eventType: auditAction,
+        refTable: 'users',
+        refId: newUserId,
+        orgId: organizationId,
+        bodyId: targetOrg.body_id || targetOrg.agency_branch,
+        payload: {
+          provisionedBy: user.userId,
+          username: effectiveUsername,
+          roleId,
+          organizationId,
+          isLayerAdmin: isNewUserAdmin,
+          auditLogId: auditRes.rows[0].id,
+        },
+      });
+
+      return newU.rows[0];
+    });
+
+    return res.status(201).json({ success: true, user: createdUser });
   } catch (err: any) {
     if (err.code === '23505') {
       return res.status(409).json({ error: 'Conflict', message: 'Username or email is already registered' });
