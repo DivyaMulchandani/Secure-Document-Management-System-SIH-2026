@@ -127,6 +127,14 @@ export async function initDatabase(): Promise<void> {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
+      ALTER TABLE admin_levels ADD COLUMN IF NOT EXISTS office_type_id VARCHAR(64);
+      ALTER TABLE admin_levels ADD COLUMN IF NOT EXISTS default_role_id VARCHAR(64);
+      ALTER TABLE admin_levels ADD COLUMN IF NOT EXISTS manages_office_users BOOLEAN DEFAULT TRUE;
+      ALTER TABLE admin_levels ADD COLUMN IF NOT EXISTS manages_subordinate_admins BOOLEAN DEFAULT TRUE;
+      ALTER TABLE admin_levels ADD COLUMN IF NOT EXISTS can_create_sub_offices BOOLEAN DEFAULT TRUE;
+      ALTER TABLE admin_levels ADD COLUMN IF NOT EXISTS can_approve_tickets BOOLEAN DEFAULT TRUE;
+      ALTER TABLE admin_levels ADD COLUMN IF NOT EXISTS max_clearance_allowed VARCHAR(32) DEFAULT 'SECRET';
+
       -- 2c. Organization Tags & Node Tags
       CREATE TABLE IF NOT EXISTS organization_tags (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -293,6 +301,8 @@ export async function initDatabase(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_update_tickets_req ON update_tickets(requester_user_id);
       CREATE INDEX IF NOT EXISTS idx_update_tickets_status ON update_tickets(status);
       CREATE INDEX IF NOT EXISTS idx_update_tickets_number ON update_tickets(ticket_number);
+      CREATE INDEX IF NOT EXISTS idx_update_tickets_org ON update_tickets(organization_id);
+      CREATE INDEX IF NOT EXISTS idx_update_tickets_target ON update_tickets(target_resource_type, target_resource_id);
 
       -- 8. Cases (Central Workspace Root)
       CREATE TABLE IF NOT EXISTS cases (
@@ -650,6 +660,8 @@ export async function initDatabase(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_audit_case ON audit_logs(case_id);
       CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);
       CREATE INDEX IF NOT EXISTS idx_audit_result ON audit_logs(result);
+      CREATE INDEX IF NOT EXISTS idx_audit_org_node ON audit_logs(organization_node_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_logs(resource_type, resource_id);
 
       -- 24b. Cryptographic Hash-Chained Ledger (tamper-evidence for audit + chain-of-custody)
       -- Stores ONLY hashes, identifiers and organisational signatures -- never PII or payloads.

@@ -272,8 +272,10 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
   const {
     username, email, displayName, badgeNumber, governmentId, phoneNumber,
     designation, departmentWing, clearanceLevel, isLayerAdmin,
-    password, roleId, organizationId
+    password
   } = req.body;
+  const roleId = req.body.roleId || req.body.primaryRoleId;
+  const organizationId = req.body.organizationId || req.body.primaryOrganizationId;
 
   const effectiveUsername = (username || (email ? email.split('@')[0] : '')).trim();
   const effectiveGovId = (governmentId || badgeNumber || `GJ-${Date.now().toString().slice(-6)}`).trim();

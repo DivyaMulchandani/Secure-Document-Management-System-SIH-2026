@@ -4,7 +4,8 @@ import { api } from '../lib/api';
 import { AgencyBadge } from '../components/ClassificationBadge';
 import {
   BuildingIcon, ShieldIcon, PlusIcon,
-  SearchIcon, AlertTriangle as AlertTriangleIcon, CheckIcon, ActivityIcon
+  SearchIcon, AlertTriangle as AlertTriangleIcon, CheckIcon, ActivityIcon,
+  EyeIcon, ClockIcon, UsersIcon, LockIcon, RefreshIcon
 } from '../components/Icons';
 import { CompulsoryTicketModal, TicketSummaryItem } from '../components/CompulsoryTicketModal';
 import { AdminAnalyticsDashboard } from '../components/admin/AdminAnalyticsDashboard';
@@ -22,6 +23,153 @@ interface AdminLevel {
   body_name?: string;
   mapped_office_count?: number;
   admin_count?: number;
+  office_type_id?: string;
+  default_role_id?: string;
+  manages_office_users?: boolean;
+  manages_subordinate_admins?: boolean;
+  can_create_sub_offices?: boolean;
+  can_approve_tickets?: boolean;
+  max_clearance_allowed?: string;
+}
+
+interface OfficeTrackingData {
+  office: {
+    id: string;
+    parent_id: string | null;
+    body_id: string;
+    agency_branch: string;
+    type_id: string;
+    name: string;
+    code: string;
+    hierarchy_path: string;
+    level: number;
+    jurisdiction_area: string;
+    status: string;
+    admin_level_name?: string;
+    admin_level_number?: number;
+    parent_name?: string;
+    parent_code?: string;
+    manages_office_users?: boolean;
+    manages_subordinate_admins?: boolean;
+    can_create_sub_offices?: boolean;
+    can_approve_tickets?: boolean;
+    max_clearance_allowed?: string;
+  };
+  governance: {
+    directAdministrators: Array<{
+      id: string;
+      username: string;
+      display_name: string;
+      badge_number?: string;
+      government_id?: string;
+      designation?: string;
+      phone_number?: string;
+      email: string;
+      status: string;
+      is_layer_admin: boolean;
+      role_id: string;
+      role_name: string;
+    }>;
+    supervisingAdministrators: Array<{
+      id: string;
+      username: string;
+      display_name: string;
+      badge_number?: string;
+      government_id?: string;
+      designation?: string;
+      phone_number?: string;
+      email: string;
+      status: string;
+      is_layer_admin: boolean;
+      role_id: string;
+      role_name: string;
+      office_id: string;
+      office_name: string;
+      office_code: string;
+      office_level: number;
+      admin_level_name?: string;
+      admin_level_number?: number;
+    }>;
+    masterAdministrators: Array<{
+      id: string;
+      username: string;
+      display_name: string;
+      badge_number?: string;
+      government_id?: string;
+      designation?: string;
+      email: string;
+      status: string;
+      role_id: string;
+      role_name: string;
+    }>;
+    rules: {
+      targetOffice: any;
+      directAdminPrivileges: any;
+      supervisoryChainPrivileges: any;
+      isolationRules: Array<{ rule: string; description: string }>;
+    };
+  };
+  tickets: Array<{
+    id: string;
+    ticket_number: string;
+    action_type: string;
+    target_resource_type: string;
+    target_resource_id: string;
+    requester_email: string;
+    requester_government_id?: string;
+    requester_name?: string;
+    requester_display_name?: string;
+    requester_badge?: string;
+    requester_role_name?: string;
+    justification: string;
+    payload: any;
+    before_state?: any;
+    status: string;
+    verified_at?: string;
+    executed_at?: string;
+    created_at: string;
+  }>;
+  adminActivity: Array<{
+    id: string;
+    timestamp: string;
+    action: string;
+    resource_type: string;
+    resource_id: string;
+    result: string;
+    actor_id?: string;
+    actor_name?: string;
+    actor_badge?: string;
+    actor_government_id?: string;
+    actor_role_name?: string;
+    ticket_number?: string;
+    justification?: string;
+    ip_address?: string;
+    metadata?: any;
+    before_value?: any;
+    after_value?: any;
+  }>;
+  userActivity: Array<{
+    id: string;
+    timestamp: string;
+    action: string;
+    resource_type: string;
+    resource_id: string;
+    result: string;
+    user_id?: string;
+    user_name?: string;
+    user_badge?: string;
+    user_government_id?: string;
+    user_role_name?: string;
+    case_fir?: string;
+    ip_address?: string;
+  }>;
+  stats: {
+    activeUsers: number;
+    activeAdmins: number;
+    immediateChildren: number;
+    descendantOffices: number;
+    totalTickets: number;
+  };
 }
 
 interface OrgTag {
@@ -91,7 +239,22 @@ export const AdminHierarchy: React.FC = () => {
     name: '',
     description: '',
     clearanceRequired: 'SECRET',
+    officeTypeId: 'POLICE_STATION',
+    defaultRoleId: 'POLICE_ADMIN',
+    managesOfficeUsers: true,
+    managesSubordinateAdmins: true,
+    canCreateSubOffices: true,
+    canApproveTickets: false,
+    maxClearanceAllowed: 'SECRET',
   });
+
+  // Office Tracking Modal State
+  const [trackingModalOpen, setTrackingModalOpen] = useState(false);
+  const [trackingOffice, setTrackingOffice] = useState<OfficeNode | null>(null);
+  const [trackingData, setTrackingData] = useState<OfficeTrackingData | null>(null);
+  const [loadingTracking, setLoadingTracking] = useState(false);
+  const [trackingSubTab, setTrackingSubTab] = useState<'GOVERNANCE' | 'ADMIN_TICKETS' | 'USER_ACTIVITY'>('GOVERNANCE');
+  const [trackingError, setTrackingError] = useState<string | null>(null);
 
   // Office Delete Modal
   const [officeToDelete, setOfficeToDelete] = useState<OfficeNode | null>(null);
@@ -290,6 +453,39 @@ export const AdminHierarchy: React.FC = () => {
     }
   };
 
+  // Open Office Authority & Activity Tracking Modal
+  const handleOpenOfficeTracking = async (office: OfficeNode) => {
+    setTrackingOffice(office);
+    setTrackingModalOpen(true);
+    setLoadingTracking(true);
+    setTrackingError(null);
+    setTrackingSubTab('GOVERNANCE');
+    try {
+      const res = await api.get<OfficeTrackingData>(`/organizations/nodes/${office.id}/tracking`);
+      setTrackingData(res);
+    } catch (err: any) {
+      console.error('Failed to load tracking data:', err);
+      setTrackingError(err.message || 'Failed to load tracking details');
+    } finally {
+      setLoadingTracking(false);
+    }
+  };
+
+  // Delete Admin Level with Safety Checks
+  const handleDeleteAdminLevel = async (level: AdminLevel) => {
+    if (level.mapped_office_count && level.mapped_office_count > 0) {
+      alert(`Cannot delete '${level.name}': ${level.mapped_office_count} office(s) are currently mapped to this tier. Reassign or unmap offices first.`);
+      return;
+    }
+    if (!confirm(`Are you sure you want to delete hierarchy level '${level.name}'?`)) return;
+    try {
+      await api.delete(`/organizations/admin-levels/${level.id}`);
+      await fetchAdminLevels();
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete admin level');
+    }
+  };
+
   // Submit Admin Level Creation via Ticket
   const handleCreateAdminLevel = (e: React.FormEvent) => {
     e.preventDefault();
@@ -297,20 +493,18 @@ export const AdminHierarchy: React.FC = () => {
 
     setTicketModalConfig({
       isOpen: true,
-      title: `Define Admin Hierarchy Level: ${levelForm.name}`,
+      title: `Define Decision-Making Layer: ${levelForm.name}`,
       actionType: 'CREATE_OFFICE_POSITION',
       targetResourceType: 'OFFICE_POSITION',
-      payload: {
-        bodyId: levelForm.bodyId,
-        levelNumber: levelForm.levelNumber,
-        name: levelForm.name,
-        description: levelForm.description,
-        clearanceRequired: levelForm.clearanceRequired,
-      },
+      payload: { ...levelForm },
       summaryItems: [
         { label: 'Admin Level Name', value: levelForm.name, highlight: true },
         { label: 'Hierarchy Tier', value: `Level ${levelForm.levelNumber}` },
         { label: 'Sovereign Body', value: levelForm.bodyId },
+        { label: 'Office Type Target', value: levelForm.officeTypeId },
+        { label: 'Default Admin Role', value: levelForm.defaultRoleId },
+        { label: 'Subordinate Admins Report Here', value: levelForm.managesSubordinateAdmins ? 'YES (Hierarchical)' : 'NO' },
+        { label: 'Manages Office Personnel', value: levelForm.managesOfficeUsers ? 'YES' : 'NO' },
         { label: 'Clearance Required', value: levelForm.clearanceRequired },
       ],
       onSuccess: async () => {
@@ -320,7 +514,20 @@ export const AdminHierarchy: React.FC = () => {
           console.error('Direct level sync fallback:', e);
         }
         setShowCreateLevelModal(false);
-        setLevelForm({ bodyId: 'POLICE', levelNumber: 3, name: '', description: '', clearanceRequired: 'SECRET' });
+        setLevelForm({
+          bodyId: 'POLICE',
+          levelNumber: 3,
+          name: '',
+          description: '',
+          clearanceRequired: 'SECRET',
+          officeTypeId: 'POLICE_STATION',
+          defaultRoleId: 'POLICE_ADMIN',
+          managesOfficeUsers: true,
+          managesSubordinateAdmins: true,
+          canCreateSubOffices: true,
+          canApproveTickets: false,
+          maxClearanceAllowed: 'SECRET',
+        });
         fetchAdminLevels();
       },
     });
@@ -672,13 +879,23 @@ export const AdminHierarchy: React.FC = () => {
                             </span>
                           </td>
 
-                          {/* Actions: Disable / Enable & Delete */}
+                          {/* Actions: Track Office, Disable / Enable & Delete */}
                           <td className="p-3 text-right">
                             <div className="flex items-center justify-end gap-1.5">
+                              {/* Track Office Button */}
+                              <button
+                                onClick={() => handleOpenOfficeTracking(office)}
+                                className="px-2.5 py-1 rounded text-[10.5px] font-mono font-semibold bg-blue-50 text-blue-800 border border-blue-200 hover:bg-blue-100 flex items-center gap-1 transition-colors shadow-2xs cursor-pointer"
+                                title="Inspect 'Who Can Change This Office', update tickets & activity tracking"
+                              >
+                                <ShieldIcon className="w-3 h-3 text-blue-700" />
+                                <span>Track Office</span>
+                              </button>
+
                               {/* Disable / Enable Button */}
                               <button
                                 onClick={() => handleToggleOfficeStatus(office)}
-                                className={`px-2 py-1 rounded text-[10.5px] font-mono font-medium border transition-colors ${
+                                className={`px-2 py-1 rounded text-[10.5px] font-mono font-medium border transition-colors cursor-pointer ${
                                   (office.status || 'ACTIVE') === 'ACTIVE'
                                     ? 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
                                     : 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
@@ -692,7 +909,7 @@ export const AdminHierarchy: React.FC = () => {
                               {office.level > 1 && office.parent_id && (
                                 <button
                                   onClick={() => handleInitiateDeleteOffice(office)}
-                                  className="px-2 py-1 rounded text-[10.5px] font-mono font-medium bg-red-50 text-red-800 border border-red-200 hover:bg-red-100 transition-colors"
+                                  className="px-2 py-1 rounded text-[10.5px] font-mono font-medium bg-red-50 text-red-800 border border-red-200 hover:bg-red-100 transition-colors cursor-pointer"
                                   title="Decommission & delete this office node"
                                 >
                                   Delete
@@ -712,71 +929,208 @@ export const AdminHierarchy: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
-      {/* TAB 2: ADMIN LEVELS CATALOG (TIERS 1 TO 5)                                */}
+      {/* TAB 2: SOVEREIGN DECISION-MAKING LAYERS & GOVERNANCE TIERS                */}
       {/* ========================================================================= */}
       {activeTab === 'LEVELS' && (
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-3 rounded-lg border border-slate-200 shadow-xs">
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-slate-500 font-mono">Filter Agency:</span>
-              <select
-                value={levelFilterBody}
-                onChange={e => setLevelFilterBody(e.target.value)}
-                className="bg-slate-50 border border-slate-200 rounded px-2.5 py-1 text-slate-800 font-mono focus:outline-hidden focus:border-blue-600"
-              >
-                <option value="ALL">All Sovereign Bodies</option>
-                <option value="POLICE">Gujarat Police</option>
-                <option value="JUDICIARY">State Judiciary</option>
-                <option value="FORENSICS">Forensics DFSS</option>
-                <option value="MASTER">Master Apex</option>
-              </select>
+        <div className="space-y-5">
+          {/* Top Explanatory Banner & Actions */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-4 rounded-lg border border-slate-200 shadow-xs">
+            <div>
+              <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <ShieldIcon className="w-4 h-4 text-blue-700" />
+                <span>Sovereign Decision-Making Layers & Hierarchy Tiers</span>
+              </h2>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Institutional command tiers strictly separated by sovereign body (Police, Judiciary, Forensics). Each layer defines the office hierarchy, personnel oversight, and subordinate administrator reporting lines.
+              </p>
             </div>
 
             <button
-              onClick={() => setShowCreateLevelModal(true)}
-              className="px-3 py-1.5 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-colors"
+              onClick={() => {
+                setLevelForm(prev => ({
+                  ...prev,
+                  bodyId: levelFilterBody === 'ALL' ? 'POLICE' : levelFilterBody,
+                }));
+                setShowCreateLevelModal(true);
+              }}
+              className="px-3.5 py-1.5 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-colors whitespace-nowrap cursor-pointer"
             >
               <PlusIcon className="w-3.5 h-3.5" />
-              <span>Define New Admin Level</span>
+              <span>Define Decision-Making Layer</span>
             </button>
           </div>
 
+          {/* Body Sub-Tab Switcher - Strictly Separated, Non-Universal */}
+          <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-lg border border-slate-300 flex-wrap">
+            <button
+              onClick={() => setLevelFilterBody('POLICE')}
+              className={`px-4 py-2 rounded-md font-mono text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                levelFilterBody === 'POLICE'
+                  ? 'bg-blue-700 text-white shadow-xs'
+                  : 'bg-white text-slate-700 hover:bg-slate-50 border border-slate-200'
+              }`}
+            >
+              <span>👮</span>
+              <span>Gujarat Police ({adminLevels.filter(l => l.body_id === 'POLICE').length} Layers)</span>
+            </button>
+
+            <button
+              onClick={() => setLevelFilterBody('JUDICIARY')}
+              className={`px-4 py-2 rounded-md font-mono text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                levelFilterBody === 'JUDICIARY'
+                  ? 'bg-blue-700 text-white shadow-xs'
+                  : 'bg-white text-slate-700 hover:bg-slate-50 border border-slate-200'
+              }`}
+            >
+              <span>⚖️</span>
+              <span>State Judiciary ({adminLevels.filter(l => l.body_id === 'JUDICIARY').length} Layers)</span>
+            </button>
+
+            <button
+              onClick={() => setLevelFilterBody('FORENSICS')}
+              className={`px-4 py-2 rounded-md font-mono text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                levelFilterBody === 'FORENSICS'
+                  ? 'bg-blue-700 text-white shadow-xs'
+                  : 'bg-white text-slate-700 hover:bg-slate-50 border border-slate-200'
+              }`}
+            >
+              <span>🔬</span>
+              <span>Forensic Science ({adminLevels.filter(l => l.body_id === 'FORENSICS').length} Layers)</span>
+            </button>
+
+            {(user?.roleId === 'MASTER_ADMIN' || user?.roleId === 'SYSTEM_MASTER_ADMIN') && (
+              <button
+                onClick={() => setLevelFilterBody('MASTER')}
+                className={`px-4 py-2 rounded-md font-mono text-xs font-bold transition-all flex items-center gap-2 cursor-pointer ${
+                  levelFilterBody === 'MASTER'
+                    ? 'bg-blue-700 text-white shadow-xs'
+                    : 'bg-white text-slate-700 hover:bg-slate-50 border border-slate-200'
+                }`}
+              >
+                <span>🏛️</span>
+                <span>Master Apex</span>
+              </button>
+            )}
+
+            <button
+              onClick={() => setLevelFilterBody('ALL')}
+              className={`px-3 py-2 rounded-md font-mono text-xs font-medium transition-all cursor-pointer ${
+                levelFilterBody === 'ALL'
+                  ? 'bg-slate-800 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Show All Bodies
+            </button>
+          </div>
+
+          {/* Level Cards Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {loadingLevels ? (
               <div className="col-span-full p-8 text-center text-slate-500 font-mono">
-                Loading admin hierarchy levels...
+                Loading sovereign decision-making layers...
               </div>
             ) : filteredLevels.length === 0 ? (
-              <div className="col-span-full p-8 text-center text-slate-500 font-mono">
-                No admin levels found for this agency filter.
+              <div className="col-span-full p-8 text-center text-slate-500 font-mono bg-white rounded-lg border border-slate-200">
+                No decision-making layers configured for this sovereign body. Click '+ Define Decision-Making Layer' to configure one.
               </div>
             ) : (
               filteredLevels.map(al => (
-                <div key={al.id} className="bg-white rounded-lg border border-slate-200 p-4 space-y-3 shadow-xs">
-                  <div className="flex items-start justify-between gap-2">
+                <div
+                  key={al.id}
+                  className="bg-white rounded-lg border border-slate-200 p-4 space-y-3.5 shadow-xs hover:border-blue-400 transition-colors"
+                >
+                  {/* Card Header: Level Number & Agency */}
+                  <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2.5">
                     <div>
                       <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-blue-50 text-blue-800 border border-blue-200">
+                        <span className="px-2 py-0.5 rounded text-[10.5px] font-mono font-bold bg-blue-50 text-blue-800 border border-blue-200">
                           TIER LEVEL {al.level_number}
                         </span>
                         <AgencyBadge branch={al.body_id} />
                       </div>
-                      <h3 className="font-bold text-slate-900 text-sm mt-1.5">{al.name}</h3>
+                      <h3 className="font-bold text-slate-900 text-sm mt-2">{al.name}</h3>
+                    </div>
+
+                    <button
+                      onClick={() => handleDeleteAdminLevel(al)}
+                      className="text-slate-400 hover:text-red-700 p-1 transition-colors text-xs font-mono font-semibold"
+                      title="Delete this decision-making layer"
+                    >
+                      Delete
+                    </button>
+                  </div>
+
+                  {/* Office Hierarchy & Default Role Representation */}
+                  <div className="grid grid-cols-2 gap-2 text-[11px] font-mono bg-slate-50 p-2.5 rounded border border-slate-100">
+                    <div>
+                      <span className="text-slate-500 block text-[10px]">Office Hierarchy Type:</span>
+                      <span className="font-bold text-slate-800">{al.office_type_id || 'OFFICE_NODE'}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block text-[10px]">Default Admin Role:</span>
+                      <span className="font-bold text-slate-800">{al.default_role_id || `${al.body_id}_ADMIN`}</span>
                     </div>
                   </div>
 
                   <p className="text-xs text-slate-600 line-clamp-2">
-                    {al.description || 'Administrative leadership tier governing subordinate personnel and facilities.'}
+                    {al.description || 'Administrative command tier governing subordinate personnel and facilities.'}
                   </p>
 
-                  <div className="pt-2 border-t border-slate-200 grid grid-cols-2 gap-2 text-xs font-mono">
+                  {/* Decision-Making Governance Capabilities */}
+                  <div className="space-y-1.5 pt-1">
+                    <span className="text-[10px] font-mono font-semibold uppercase text-slate-500 block">
+                      Decision-Making Authority:
+                    </span>
+                    <div className="grid grid-cols-2 gap-1.5 text-[10.5px] font-mono">
+                      <div className={`px-2 py-1 rounded border flex items-center gap-1.5 ${
+                        al.manages_office_users !== false
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200 font-semibold'
+                          : 'bg-slate-50 text-slate-400 border-slate-200'
+                      }`}>
+                        <span>{al.manages_office_users !== false ? '✓' : '✗'}</span>
+                        <span>Manages Office Users</span>
+                      </div>
+
+                      <div className={`px-2 py-1 rounded border flex items-center gap-1.5 ${
+                        al.manages_subordinate_admins !== false
+                          ? 'bg-blue-50 text-blue-800 border-blue-200 font-semibold'
+                          : 'bg-slate-50 text-slate-400 border-slate-200'
+                      }`}>
+                        <span>{al.manages_subordinate_admins !== false ? '✓' : '✗'}</span>
+                        <span title="Admins of lower offices in hierarchy report here">Sub-Admins Under Here</span>
+                      </div>
+
+                      <div className={`px-2 py-1 rounded border flex items-center gap-1.5 ${
+                        al.can_create_sub_offices
+                          ? 'bg-purple-50 text-purple-800 border-purple-200 font-semibold'
+                          : 'bg-slate-50 text-slate-400 border-slate-200'
+                      }`}>
+                        <span>{al.can_create_sub_offices ? '✓' : '✗'}</span>
+                        <span>Can Create Offices</span>
+                      </div>
+
+                      <div className={`px-2 py-1 rounded border flex items-center gap-1.5 ${
+                        al.can_approve_tickets
+                          ? 'bg-amber-50 text-amber-800 border-amber-200 font-semibold'
+                          : 'bg-slate-50 text-slate-400 border-slate-200'
+                      }`}>
+                        <span>{al.can_approve_tickets ? '✓' : '✗'}</span>
+                        <span>Approves Tickets</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Card Footer: Clearance & Mapped Offices */}
+                  <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-xs font-mono">
                     <div>
-                      <span className="text-slate-500 block text-[10.5px]">Clearance:</span>
-                      <span className="text-slate-900 font-semibold">{al.clearance_required}</span>
+                      <span className="text-slate-500 text-[10.5px]">Clearance: </span>
+                      <span className="text-slate-900 font-semibold">{al.max_clearance_allowed || al.clearance_required}</span>
                     </div>
                     <div>
-                      <span className="text-slate-500 block text-[10.5px]">Mapped Offices:</span>
-                      <span className="text-blue-700 font-semibold">{al.mapped_office_count || 0} offices</span>
+                      <span className="text-blue-700 font-bold bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                        {al.mapped_office_count || 0} mapped
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -944,51 +1298,64 @@ export const AdminHierarchy: React.FC = () => {
       {/* MODAL: CREATE ADMIN LEVEL                                                 */}
       {/* ========================================================================= */}
       {showCreateLevelModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
-          <div className="bg-white border border-slate-200 rounded-lg max-w-md w-full p-5 space-y-4 shadow-xl text-slate-900">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white border border-slate-200 rounded-xl max-w-lg w-full p-5 space-y-4 shadow-xl text-slate-900 my-8">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <h3 className="font-bold text-slate-900 text-sm">Define New Admin Hierarchy Level</h3>
+              <div>
+                <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                  <ShieldIcon className="w-4 h-4 text-blue-700" />
+                  <span>Define Sovereign Decision-Making Layer</span>
+                </h3>
+                <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                  Establish an institutional governance tier with office mapping and personnel decision-making authority.
+                </p>
+              </div>
               <button
                 onClick={() => setShowCreateLevelModal(false)}
-                className="text-slate-400 hover:text-slate-700 font-mono text-base px-1"
+                className="text-slate-400 hover:text-slate-700 font-mono text-base px-1 cursor-pointer"
               >
                 ✕
               </button>
             </div>
 
-            <form onSubmit={handleCreateAdminLevel} className="space-y-3 text-xs">
+            <form onSubmit={handleCreateAdminLevel} className="space-y-3.5 text-xs">
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-slate-700 font-mono mb-1 font-semibold">Sovereign Body *</label>
                   <select
                     value={levelForm.bodyId}
-                    onChange={e => setLevelForm(prev => ({ ...prev, bodyId: e.target.value }))}
-                    className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-slate-900 font-mono focus:outline-hidden focus:border-blue-600"
+                    onChange={e => {
+                      const b = e.target.value;
+                      const defaultType = b === 'POLICE' ? 'POLICE_STATION' : b === 'JUDICIARY' ? 'DISTRICT_COURT' : 'REGIONAL_FSL';
+                      const defaultRole = b === 'POLICE' ? 'POLICE_ADMIN' : b === 'JUDICIARY' ? 'JUDICIARY_ADMIN' : 'FSL_ADMIN';
+                      setLevelForm(prev => ({ ...prev, bodyId: b, officeTypeId: defaultType, defaultRoleId: defaultRole }));
+                    }}
+                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 font-mono focus:outline-hidden focus:border-blue-600 font-bold"
                   >
                     <option value="POLICE">Gujarat Police</option>
                     <option value="JUDICIARY">State Judiciary</option>
-                    <option value="FORENSICS">Forensic DFSS</option>
+                    <option value="FORENSICS">Forensic Science (DFSS)</option>
                   </select>
                 </div>
 
                 <div>
-                  <label className="block text-slate-700 font-mono mb-1 font-semibold">Tier Level (1–5) *</label>
+                  <label className="block text-slate-700 font-mono mb-1 font-semibold">Tier Rank (1–5) *</label>
                   <select
                     value={levelForm.levelNumber}
                     onChange={e => setLevelForm(prev => ({ ...prev, levelNumber: parseInt(e.target.value, 10) }))}
-                    className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-slate-900 font-mono focus:outline-hidden focus:border-blue-600"
+                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 font-mono focus:outline-hidden focus:border-blue-600 font-bold"
                   >
-                    <option value={1}>Level 1: Sovereign Apex Command</option>
-                    <option value={2}>Level 2: Zonal / Commissionerate</option>
-                    <option value={3}>Level 3: Divisional / District</option>
-                    <option value={4}>Level 4: Station / Unit Level</option>
-                    <option value={5}>Level 5: Section / Desk Level</option>
+                    <option value={1}>Tier 1: Sovereign Apex Command</option>
+                    <option value={2}>Tier 2: Range / Commissionerate</option>
+                    <option value={3}>Tier 3: Divisional / District</option>
+                    <option value={4}>Tier 4: Station / Unit Level</option>
+                    <option value={5}>Tier 5: Section / Specialized Desk</option>
                   </select>
                 </div>
               </div>
 
               <div>
-                <label className="block text-slate-700 font-mono mb-1 font-semibold">Admin Level Name *</label>
+                <label className="block text-slate-700 font-mono mb-1 font-semibold">Layer Official Name *</label>
                 <input
                   type="text"
                   required
@@ -999,24 +1366,167 @@ export const AdminHierarchy: React.FC = () => {
                 />
               </div>
 
-              <div>
-                <label className="block text-slate-700 font-mono mb-1 font-semibold">Clearance Required</label>
-                <select
-                  value={levelForm.clearanceRequired}
-                  onChange={e => setLevelForm(prev => ({ ...prev, clearanceRequired: e.target.value }))}
-                  className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-slate-900 font-mono focus:outline-hidden focus:border-blue-600"
-                >
-                  <option value="CONFIDENTIAL">CONFIDENTIAL</option>
-                  <option value="SECRET">SECRET</option>
-                  <option value="TOP_SECRET">TOP_SECRET</option>
-                </select>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-700 font-mono mb-1 font-semibold">Office Hierarchy Type *</label>
+                  <select
+                    value={levelForm.officeTypeId}
+                    onChange={e => setLevelForm(prev => ({ ...prev, officeTypeId: e.target.value }))}
+                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 font-mono focus:outline-hidden focus:border-blue-600"
+                  >
+                    {levelForm.bodyId === 'POLICE' && (
+                      <>
+                        <option value="POLICE_HQ">State Police Headquarters (HQ)</option>
+                        <option value="COMMISSIONERATE">Metropolitan Commissionerate</option>
+                        <option value="RANGE_IG">Range IGP Command Office</option>
+                        <option value="DIVISION">Zonal / District SP Division</option>
+                        <option value="POLICE_STATION">Police Station / Unit</option>
+                        <option value="SPECIAL_WING">Cyber / SOG / CID Wing</option>
+                      </>
+                    )}
+                    {levelForm.bodyId === 'JUDICIARY' && (
+                      <>
+                        <option value="HIGH_COURT">High Court of Gujarat (Apex)</option>
+                        <option value="DISTRICT_COURT">Principal District & Sessions Court</option>
+                        <option value="TALUKA_COURT">Sub-Divisional / Taluka Court</option>
+                        <option value="EXECUTIVE_MAGISTRACY">Executive Magistracy Court</option>
+                      </>
+                    )}
+                    {levelForm.bodyId === 'FORENSICS' && (
+                      <>
+                        <option value="STATE_FSL_HQ">State Directorate FSL HQ</option>
+                        <option value="REGIONAL_FSL">Regional Forensic Laboratory</option>
+                        <option value="DISTRICT_MOBILE_UNIT">Mobile Scene-of-Crime Unit</option>
+                      </>
+                    )}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-700 font-mono mb-1 font-semibold">Default Admin Role *</label>
+                  <select
+                    value={levelForm.defaultRoleId}
+                    onChange={e => setLevelForm(prev => ({ ...prev, defaultRoleId: e.target.value }))}
+                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 font-mono focus:outline-hidden focus:border-blue-600"
+                  >
+                    {levelForm.bodyId === 'POLICE' && (
+                      <>
+                        <option value="POLICE_BODY_ADMIN">State Police Body Admin</option>
+                        <option value="POLICE_ADMIN">Police Node / Station Admin</option>
+                        <option value="POLICE_OFFICER">Police Investigating Officer</option>
+                      </>
+                    )}
+                    {levelForm.bodyId === 'JUDICIARY' && (
+                      <>
+                        <option value="JUDICIARY_BODY_ADMIN">High Court Registrar General</option>
+                        <option value="JUDICIARY_ADMIN">Court Administrator</option>
+                        <option value="JUDGE">Presiding Judge / Magistrate</option>
+                        <option value="COURT_USER">Court Staff / Clerk</option>
+                      </>
+                    )}
+                    {levelForm.bodyId === 'FORENSICS' && (
+                      <>
+                        <option value="FSL_BODY_ADMIN">Director Forensic Science</option>
+                        <option value="FSL_ADMIN">Forensic Lab Administrator</option>
+                        <option value="FORENSIC_EXAMINER">Forensic Scientific Officer</option>
+                      </>
+                    )}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-700 font-mono mb-1 font-semibold">Clearance Required</label>
+                  <select
+                    value={levelForm.clearanceRequired}
+                    onChange={e => setLevelForm(prev => ({ ...prev, clearanceRequired: e.target.value }))}
+                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 font-mono focus:outline-hidden focus:border-blue-600"
+                  >
+                    <option value="CONFIDENTIAL">CONFIDENTIAL</option>
+                    <option value="SECRET">SECRET</option>
+                    <option value="TOP_SECRET">TOP_SECRET</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-700 font-mono mb-1 font-semibold">Max Clearance Allowed</label>
+                  <select
+                    value={levelForm.maxClearanceAllowed}
+                    onChange={e => setLevelForm(prev => ({ ...prev, maxClearanceAllowed: e.target.value }))}
+                    className="w-full bg-white border border-slate-300 rounded px-2.5 py-1.5 text-slate-900 font-mono focus:outline-hidden focus:border-blue-600"
+                  >
+                    <option value="CONFIDENTIAL">CONFIDENTIAL</option>
+                    <option value="SECRET">SECRET</option>
+                    <option value="TOP_SECRET">TOP_SECRET</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Decision-Making Authority Checkboxes */}
+              <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2 font-mono">
+                <span className="text-[10.5px] font-bold text-slate-700 uppercase block border-b border-slate-200 pb-1">
+                  Decision-Making Powers & Hierarchical Authority
+                </span>
+
+                <label className="flex items-start gap-2 text-xs text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={levelForm.managesOfficeUsers}
+                    onChange={e => setLevelForm(prev => ({ ...prev, managesOfficeUsers: e.target.checked }))}
+                    className="mt-0.5 rounded text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>
+                    <strong className="block text-slate-900">Manages Office Users</strong>
+                    <span className="text-[10.5px] text-slate-500">Administrator has direct personnel authority over officers stationed at this office.</span>
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2 text-xs text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={levelForm.managesSubordinateAdmins}
+                    onChange={e => setLevelForm(prev => ({ ...prev, managesSubordinateAdmins: e.target.checked }))}
+                    className="mt-0.5 rounded text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>
+                    <strong className="block text-slate-900">Subordinate Office Admins Report Here</strong>
+                    <span className="text-[10.5px] text-slate-500">Administrators of lower-tier offices in the hierarchy tree come directly under this tier admin.</span>
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2 text-xs text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={levelForm.canCreateSubOffices}
+                    onChange={e => setLevelForm(prev => ({ ...prev, canCreateSubOffices: e.target.checked }))}
+                    className="mt-0.5 rounded text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>
+                    <strong className="block text-slate-900">Can Establish Subordinate Offices</strong>
+                    <span className="text-[10.5px] text-slate-500">Authorized to establish and configure child stations, outposts, and divisions.</span>
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2 text-xs text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={levelForm.canApproveTickets}
+                    onChange={e => setLevelForm(prev => ({ ...prev, canApproveTickets: e.target.checked }))}
+                    className="mt-0.5 rounded text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>
+                    <strong className="block text-slate-900">Approve Compulsory Update Tickets</strong>
+                    <span className="text-[10.5px] text-slate-500">Authority to sign off on mutational tickets submitted by subordinate personnel.</span>
+                  </span>
+                </label>
               </div>
 
               <div>
-                <label className="block text-slate-700 font-mono mb-1 font-semibold">Description</label>
+                <label className="block text-slate-700 font-mono mb-1 font-semibold">Jurisdictional Mandate & Description</label>
                 <textarea
                   rows={2}
-                  placeholder="Authority scope and delegation rules..."
+                  placeholder="Statutory authority scope, delegation rules, and operational mandates..."
                   value={levelForm.description}
                   onChange={e => setLevelForm(prev => ({ ...prev, description: e.target.value }))}
                   className="w-full bg-white border border-slate-300 rounded px-3 py-1.5 text-slate-900 font-mono focus:outline-hidden focus:border-blue-600"
@@ -1027,15 +1537,15 @@ export const AdminHierarchy: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setShowCreateLevelModal(false)}
-                  className="px-3 py-1.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300 font-mono text-xs font-medium"
+                  className="px-3 py-1.5 rounded bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300 font-mono text-xs font-medium cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white font-mono text-xs font-semibold shadow-sm transition-colors"
+                  className="px-4 py-1.5 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white font-mono text-xs font-semibold shadow-sm transition-colors cursor-pointer"
                 >
-                  Continue to Ticket
+                  Save Decision-Making Layer via Ticket
                 </button>
               </div>
             </form>
@@ -1157,6 +1667,422 @@ export const AdminHierarchy: React.FC = () => {
                 className="px-3 py-1.5 rounded bg-red-600 hover:bg-red-700 text-white font-mono text-xs font-semibold shadow-xs"
               >
                 Continue to Ticket
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: OFFICE AUTHORITY GOVERNANCE & AUDIT/TICKET TRACKING                 */}
+      {/* ========================================================================= */}
+      {trackingModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white border border-slate-200 rounded-xl max-w-4xl w-full max-h-[90vh] flex flex-col shadow-2xl text-slate-900 overflow-hidden my-6">
+            {/* Modal Header */}
+            <div className="p-4 bg-slate-900 text-white flex items-center justify-between border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <ShieldIcon className="w-5 h-5 text-blue-400" />
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="font-bold text-base leading-none">
+                      {trackingOffice?.name}
+                    </h2>
+                    <span className="px-2 py-0.5 rounded text-[10.5px] font-mono font-bold bg-blue-900/60 text-blue-200 border border-blue-700">
+                      {trackingOffice?.code}
+                    </span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border ${
+                      (trackingOffice?.status || 'ACTIVE') === 'ACTIVE'
+                        ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
+                        : 'bg-red-950 text-red-300 border-red-700'
+                    }`}>
+                      {trackingOffice?.status || 'ACTIVE'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 font-mono mt-1">
+                    {trackingOffice?.agency_branch} • Level {trackingOffice?.level} • Tier: {trackingOffice?.admin_level_name || 'Standard LEA Unit'}
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setTrackingModalOpen(false)}
+                className="text-slate-400 hover:text-white font-mono text-xl p-1 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Quick Metrics Bar */}
+            {trackingData && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-3 bg-slate-50 border-b border-slate-200 text-xs font-mono">
+                <div className="bg-white p-2 rounded border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase block">Active Personnel</span>
+                  <span className="text-base font-bold text-slate-900">{trackingData.stats.activeUsers}</span>
+                </div>
+                <div className="bg-white p-2 rounded border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase block">Direct Admins</span>
+                  <span className="text-base font-bold text-blue-700">{trackingData.stats.activeAdmins}</span>
+                </div>
+                <div className="bg-white p-2 rounded border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase block">Sub-Offices Under Command</span>
+                  <span className="text-base font-bold text-purple-700">{trackingData.stats.descendantOffices}</span>
+                </div>
+                <div className="bg-white p-2 rounded border border-slate-200">
+                  <span className="text-[10px] text-slate-500 uppercase block">Compulsory Tickets</span>
+                  <span className="text-base font-bold text-emerald-700">{trackingData.stats.totalTickets}</span>
+                </div>
+              </div>
+            )}
+
+            {/* Sub-Tab Navigation */}
+            <div className="flex border-b border-slate-200 bg-white px-4 pt-2 gap-2 text-xs font-mono font-semibold">
+              <button
+                onClick={() => setTrackingSubTab('GOVERNANCE')}
+                className={`pb-2.5 px-3 border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  trackingSubTab === 'GOVERNANCE'
+                    ? 'border-blue-600 text-blue-700'
+                    : 'border-transparent text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <ShieldIcon className="w-3.5 h-3.5" />
+                <span>Who Can Change This Office</span>
+              </button>
+
+              <button
+                onClick={() => setTrackingSubTab('ADMIN_TICKETS')}
+                className={`pb-2.5 px-3 border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  trackingSubTab === 'ADMIN_TICKETS'
+                    ? 'border-blue-600 text-blue-700'
+                    : 'border-transparent text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <ClockIcon className="w-3.5 h-3.5" />
+                <span>Admin Activity & Tickets ({trackingData?.tickets.length || 0})</span>
+              </button>
+
+              <button
+                onClick={() => setTrackingSubTab('USER_ACTIVITY')}
+                className={`pb-2.5 px-3 border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  trackingSubTab === 'USER_ACTIVITY'
+                    ? 'border-blue-600 text-blue-700'
+                    : 'border-transparent text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <ActivityIcon className="w-3.5 h-3.5" />
+                <span>Office Personnel Operational Feed ({trackingData?.userActivity.length || 0})</span>
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-4 overflow-y-auto flex-1 space-y-4">
+              {loadingTracking ? (
+                <div className="p-12 text-center text-slate-500 font-mono">
+                  Loading office authority governance & audit tracking...
+                </div>
+              ) : trackingError ? (
+                <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-xs font-mono">
+                  {trackingError}
+                </div>
+              ) : !trackingData ? (
+                <div className="p-8 text-center text-slate-400 font-mono">
+                  No tracking data available.
+                </div>
+              ) : (
+                <>
+                  {/* SUB-TAB 1: WHO CAN CHANGE THIS OFFICE */}
+                  {trackingSubTab === 'GOVERNANCE' && (
+                    <div className="space-y-4">
+                      {/* Governance Rules Alert */}
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-1.5">
+                        <div className="flex items-center gap-2 text-blue-900 font-bold text-xs font-mono">
+                          <LockIcon className="w-3.5 h-3.5 text-blue-700" />
+                          <span>MANDATORY LEA GOVERNANCE & ISOLATION POLICIES</span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono text-blue-950">
+                          {trackingData.governance.rules.isolationRules.map((r, i) => (
+                            <div key={i} className="bg-white/90 p-2.5 rounded border border-blue-100 shadow-2xs">
+                              <span className="font-bold block text-blue-900">{r.rule}:</span>
+                              <span className="text-slate-700">{r.description}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Direct Administrators */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-bold font-mono uppercase text-slate-700 flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span>
+                            <span>Direct Office Administrators (Stationed Directly at this Node)</span>
+                          </h4>
+                          <span className="text-[11px] font-mono text-slate-500">
+                            {trackingData.governance.directAdministrators.length} active
+                          </span>
+                        </div>
+
+                        {trackingData.governance.directAdministrators.length === 0 ? (
+                          <div className="p-4 bg-slate-50 rounded-lg border border-slate-200 text-xs text-slate-500 font-mono italic">
+                            No direct layer administrator is currently stationed at this office. Administration falls to superior chain supervisors.
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            {trackingData.governance.directAdministrators.map(adm => (
+                              <div key={adm.id} className="p-3 bg-white rounded-lg border border-slate-200 shadow-xs space-y-1 text-xs font-mono">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-bold text-slate-900">{adm.display_name}</span>
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                    DIRECT ADMIN
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-slate-600">
+                                  <span>{adm.designation || 'Administrator'}</span>
+                                  {adm.badge_number && <span> • Badge: {adm.badge_number}</span>}
+                                </div>
+                                <div className="text-[10.5px] text-blue-700 font-semibold">
+                                  Gov ID: {adm.government_id || 'N/A'} • Role: {adm.role_name}
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  Email: {adm.email} {adm.phone_number ? `• Ph: ${adm.phone_number}` : ''}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Supervising Parent Chain Administrators */}
+                      <div className="space-y-2 pt-2 border-t border-slate-200">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-bold font-mono uppercase text-slate-700 flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-blue-600 inline-block"></span>
+                            <span>Supervising Upward Chain Administrators (Hierarchical Parents)</span>
+                          </h4>
+                          <span className="text-[11px] font-mono text-slate-500">
+                            {trackingData.governance.supervisingAdministrators.length} superior authorities
+                          </span>
+                        </div>
+
+                        {trackingData.governance.supervisingAdministrators.length === 0 ? (
+                          <div className="p-4 bg-slate-50 rounded-lg border border-slate-200 text-xs text-slate-500 font-mono italic">
+                            This office is at the apex or has no parent administrators currently provisioned in its vertical command line.
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            {trackingData.governance.supervisingAdministrators.map(adm => (
+                              <div key={adm.id} className="p-3 bg-slate-50 rounded-lg border border-slate-200 shadow-xs space-y-1 text-xs font-mono">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-bold text-slate-900">{adm.display_name}</span>
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-50 text-blue-800 border border-blue-200">
+                                    SUPERVISOR
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-slate-700 font-semibold">
+                                  Office: {adm.office_name} ({adm.office_code}) • Level {adm.office_level}
+                                </div>
+                                <div className="text-[10.5px] text-blue-800">
+                                  Gov ID: {adm.government_id || 'N/A'} • Role: {adm.role_name}
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  Email: {adm.email} • Tier: {adm.admin_level_name || `Level ${adm.office_level}`}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Universal Master Admins */}
+                      <div className="space-y-2 pt-2 border-t border-slate-200">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-bold font-mono uppercase text-slate-700 flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-slate-800 inline-block"></span>
+                            <span>Universal Master Administrators (Cross-Agency Apex)</span>
+                          </h4>
+                          <span className="text-[11px] font-mono text-slate-500">
+                            {trackingData.governance.masterAdministrators.length} accounts
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-mono">
+                          {trackingData.governance.masterAdministrators.map(m => (
+                            <div key={m.id} className="p-2.5 bg-slate-100 rounded border border-slate-200 flex items-center justify-between">
+                              <div>
+                                <span className="font-bold text-slate-900 block">{m.display_name}</span>
+                                <span className="text-[10.5px] text-slate-500">{m.email}</span>
+                              </div>
+                              <span className="px-2 py-0.5 rounded text-[9.5px] font-bold bg-slate-200 text-slate-800">
+                                {m.role_name}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* SUB-TAB 2: ADMIN ACTIVITY & COMPULSORY TICKETS */}
+                  {trackingSubTab === 'ADMIN_TICKETS' && (
+                    <div className="space-y-5">
+                      {/* Compulsory Update Tickets Section */}
+                      <div className="space-y-2.5">
+                        <h4 className="text-xs font-bold font-mono uppercase text-slate-800 flex items-center gap-1.5">
+                          <ClockIcon className="w-3.5 h-3.5 text-blue-700" />
+                          <span>Compulsory LEA Update Tickets Targeting This Office</span>
+                        </h4>
+
+                        {trackingData.tickets.length === 0 ? (
+                          <div className="p-6 bg-slate-50 rounded-lg border border-slate-200 text-center text-slate-500 text-xs font-mono">
+                            Zero update tickets on record for this office node.
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {trackingData.tickets.map(tck => (
+                              <div key={tck.id} className="p-3 bg-white rounded-lg border border-slate-200 shadow-xs space-y-1.5 text-xs font-mono">
+                                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-1.5">
+                                  <div className="flex items-center gap-2">
+                                    <span className="px-2 py-0.5 rounded font-bold bg-blue-50 text-blue-800 border border-blue-300">
+                                      {tck.ticket_number}
+                                    </span>
+                                    <span className="font-semibold text-slate-900">{tck.action_type}</span>
+                                  </div>
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                    tck.status === 'EXECUTED'
+                                      ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                                      : 'bg-amber-50 text-amber-800 border-amber-300'
+                                  }`}>
+                                    {tck.status}
+                                  </span>
+                                </div>
+
+                                <div className="text-slate-700">
+                                  <span className="text-slate-500 font-semibold">Justification: </span>
+                                  <span>{tck.justification}</span>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-[11px] text-slate-500 pt-1 border-t border-slate-100">
+                                  <div>
+                                    <span>Requester: </span>
+                                    <span className="text-slate-800 font-semibold">
+                                      {tck.requester_name || tck.requester_display_name || tck.requester_email}
+                                    </span>
+                                    {tck.requester_government_id && (
+                                      <span className="text-blue-700"> ({tck.requester_government_id})</span>
+                                    )}
+                                  </div>
+                                  <div className="sm:text-right">
+                                    <span>Executed: </span>
+                                    <span className="text-slate-800 font-semibold">
+                                      {tck.executed_at ? new Date(tck.executed_at).toLocaleString() : 'Pending'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Mutational Audit Trail */}
+                      <div className="space-y-2.5 pt-3 border-t border-slate-200">
+                        <h4 className="text-xs font-bold font-mono uppercase text-slate-800 flex items-center gap-1.5">
+                          <ActivityIcon className="w-3.5 h-3.5 text-blue-700" />
+                          <span>Administrative Mutational Audit Trail</span>
+                        </h4>
+
+                        {trackingData.adminActivity.length === 0 ? (
+                          <div className="p-6 bg-slate-50 rounded-lg border border-slate-200 text-center text-slate-500 text-xs font-mono">
+                            No mutational audit logs recorded for this office.
+                          </div>
+                        ) : (
+                          <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden bg-white">
+                            {trackingData.adminActivity.map(al => (
+                              <div key={al.id} className="p-3 text-xs font-mono space-y-1 hover:bg-slate-50/70">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-bold text-slate-900">{al.action}</span>
+                                    {al.ticket_number && (
+                                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-50 text-blue-800 border border-blue-200 font-bold">
+                                        Ticket: {al.ticket_number}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="text-slate-500 text-[11px]">
+                                    {new Date(al.timestamp).toLocaleString()}
+                                  </span>
+                                </div>
+
+                                <div className="text-[11.5px] text-slate-600 flex items-center gap-2 flex-wrap">
+                                  <span>Actor: <strong className="text-slate-800">{al.actor_name || 'System'}</strong></span>
+                                  {al.actor_government_id && <span>• Gov ID: <strong className="text-blue-700">{al.actor_government_id}</strong></span>}
+                                  {al.actor_badge && <span>• Badge: {al.actor_badge}</span>}
+                                  {al.ip_address && <span>• IP: {al.ip_address}</span>}
+                                </div>
+
+                                {al.justification && (
+                                  <div className="text-[11px] text-slate-600 italic">
+                                    "{al.justification}"
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* SUB-TAB 3: OFFICE USER OPERATIONAL ACTIVITY */}
+                  {trackingSubTab === 'USER_ACTIVITY' && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-xs font-bold font-mono uppercase text-slate-800 flex items-center gap-1.5">
+                          <UsersIcon className="w-3.5 h-3.5 text-blue-700" />
+                          <span>Operational Activities Performed by Office Staff</span>
+                        </h4>
+                        <span className="text-[11px] font-mono text-slate-500">
+                          {trackingData.userActivity.length} recent events
+                        </span>
+                      </div>
+
+                      {trackingData.userActivity.length === 0 ? (
+                        <div className="p-8 bg-slate-50 rounded-lg border border-slate-200 text-center text-slate-500 text-xs font-mono">
+                          Zero operational user logs recorded under this office unit.
+                        </div>
+                      ) : (
+                        <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden bg-white">
+                          {trackingData.userActivity.map(ua => (
+                            <div key={ua.id} className="p-3 text-xs font-mono space-y-1 hover:bg-slate-50/70">
+                              <div className="flex items-center justify-between">
+                                <span className="font-bold text-slate-900">{ua.action}</span>
+                                <span className="text-slate-500 text-[11px]">
+                                  {new Date(ua.timestamp).toLocaleString()}
+                                </span>
+                              </div>
+                              <div className="text-[11.5px] text-slate-600 flex items-center gap-2 flex-wrap">
+                                <span>Officer: <strong className="text-slate-800">{ua.user_name || 'Anonymous Officer'}</strong></span>
+                                {ua.user_government_id && <span>• Gov ID: <strong className="text-blue-700">{ua.user_government_id}</strong></span>}
+                                {ua.user_badge && <span>• Badge: {ua.user_badge}</span>}
+                                {ua.case_fir && <span>• Case FIR: <strong className="text-purple-700">{ua.case_fir}</strong></span>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-3 bg-slate-100 border-t border-slate-200 flex items-center justify-between font-mono text-xs text-slate-600">
+              <span className="text-[11px]">State of Gujarat • Sovereign Multi-Agency Investigation & Court Portal</span>
+              <button
+                onClick={() => setTrackingModalOpen(false)}
+                className="px-4 py-1.5 rounded bg-slate-800 hover:bg-slate-900 text-white font-semibold transition-colors cursor-pointer"
+              >
+                Close Tracking Inspector
               </button>
             </div>
           </div>

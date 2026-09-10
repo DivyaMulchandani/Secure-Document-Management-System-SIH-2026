@@ -12,7 +12,8 @@
     "test:milestone1": "tsx ../tests/milestone1.test.ts",
     "test:passwordless": "tsx ../tests/passwordless_tickets.test.ts",
     "test:batch": "tsx ../tests/batch_hierarchy_smtp.test.ts",
-    "test:ledger": "tsx ../tests/ledger.test.ts"
+    "test:ledger": "tsx ../tests/ledger.test.ts",
+    "test:tracking": "tsx ../tests/office_tracking_decision_layers.test.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

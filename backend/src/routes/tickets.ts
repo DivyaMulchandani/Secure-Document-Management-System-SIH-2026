@@ -203,9 +203,10 @@ router.post('/request-otp', requireAuth, async (req: Request, res: Response) => 
 // POST /api/tickets/execute-with-otp - Step 2: Verify OTP & Execute Action
 router.post('/execute-with-otp', requireAuth, async (req: Request, res: Response) => {
   const user = req.userSession!;
-  const { ticketId, otp } = req.body;
+  const { ticketId, otp, otpCode } = req.body;
+  const effectiveOtp = otp || otpCode;
 
-  if (!ticketId || !otp) {
+  if (!ticketId || !effectiveOtp) {
     return res.status(400).json({ error: 'Validation Error', message: 'Ticket ID and OTP are required' });
   }
 
@@ -236,7 +237,7 @@ router.post('/execute-with-otp', requireAuth, async (req: Request, res: Response
     return res.status(401).json({ error: 'Expired OTP', message: 'Authorization OTP has expired. Please request a new ticket.' });
   }
 
-  if (ticket.otp_code !== otp.trim()) {
+  if (ticket.otp_code !== effectiveOtp.trim()) {
     return res.status(401).json({ error: 'Invalid OTP', message: 'Incorrect 6-digit authorization code.' });
   }
 

@@ -174,30 +174,117 @@ export async function seedDatabase(): Promise<void> {
   // 1d. Seed Institutional Admin Levels
   console.log('Seeding institutional admin hierarchy levels...');
   const adminLevels = [
-    { id: 'MASTER_L1_APEX', level_number: 1, body_id: 'MASTER', name: 'System Master Apex Admin', description: 'State Sovereign System Root Authority', clearance_required: 'TOP_SECRET' },
-    { id: 'POL_L1_DGP', level_number: 1, body_id: 'POLICE', name: 'State Police Apex Command (DGP)', description: 'Statewide Police Command & Control Authority', clearance_required: 'TOP_SECRET' },
-    { id: 'POL_L2_COMM', level_number: 2, body_id: 'POLICE', name: 'Metropolitan / Range Admin (CP/IGP)', description: 'Commissionerate & Range Level Governance', clearance_required: 'SECRET' },
-    { id: 'POL_L3_DIV', level_number: 3, body_id: 'POLICE', name: 'Divisional / District Admin (DCP/SP)', description: 'Zonal & District Command Authority', clearance_required: 'SECRET' },
-    { id: 'POL_L4_STATION', level_number: 4, body_id: 'POLICE', name: 'Station SHO Admin (PI/Senior Officer)', description: 'Police Station / Outpost Unit Administrator', clearance_required: 'CONFIDENTIAL' },
-    { id: 'POL_L5_DESK', level_number: 5, body_id: 'POLICE', name: 'Section / Special Desk Admin (PSI/Desk)', description: 'Cyber / SOG / Evidence Desk Administrator', clearance_required: 'CONFIDENTIAL' },
-    { id: 'JUD_L1_HIGH_COURT', level_number: 1, body_id: 'JUDICIARY', name: 'High Court Apex Admin (Registrar General)', description: 'Apex Judiciary Command & Registry Authority', clearance_required: 'TOP_SECRET' },
-    { id: 'JUD_L2_DISTRICT', level_number: 2, body_id: 'JUDICIARY', name: 'Principal District Judge Admin', description: 'District & Sessions Court Administration', clearance_required: 'SECRET' },
-    { id: 'JUD_L3_SUBDIV', level_number: 3, body_id: 'JUDICIARY', name: 'Sub-Divisional Court Admin', description: 'Taluka & Sub-Divisional Court Governance', clearance_required: 'SECRET' },
-    { id: 'JUD_L4_MAGISTRATE', level_number: 4, body_id: 'JUDICIARY', name: 'Court Unit / Registry Admin', description: 'JMFC & Court Registry Section Admin', clearance_required: 'CONFIDENTIAL' },
-    { id: 'FOR_L1_DIRECTOR', level_number: 1, body_id: 'FORENSICS', name: 'Directorate Apex Admin (Director SFSL)', description: 'Statewide Forensic Science Directorate Command', clearance_required: 'TOP_SECRET' },
-    { id: 'FOR_L2_REGIONAL', level_number: 2, body_id: 'FORENSICS', name: 'Regional Lab Admin (Joint/Addl Director)', description: 'Regional Forensic Science Lab Governance', clearance_required: 'SECRET' },
-    { id: 'FOR_L3_DIVISION', level_number: 3, body_id: 'FORENSICS', name: 'Scientific Division Admin (Assistant Director)', description: 'Ballistics, DNA, Cyber Lab Division Head', clearance_required: 'SECRET' },
-    { id: 'FOR_L4_MOBILE', level_number: 4, body_id: 'FORENSICS', name: 'District Mobile Unit Admin (SSO)', description: 'Mobile Forensic Scene-of-Crime Unit Admin', clearance_required: 'CONFIDENTIAL' },
+    {
+      id: 'MASTER_L1_APEX', level_number: 1, body_id: 'MASTER', name: 'System Master Apex Admin',
+      description: 'State Sovereign System Root Authority', clearance_required: 'TOP_SECRET',
+      office_type_id: 'MASTER_APEX', default_role_id: 'MASTER_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'POL_L1_DGP', level_number: 1, body_id: 'POLICE', name: 'State Police Apex Command (DGP)',
+      description: 'Statewide Police Command & Control Authority', clearance_required: 'TOP_SECRET',
+      office_type_id: 'POLICE_HQ', default_role_id: 'POLICE_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'POL_L2_COMM', level_number: 2, body_id: 'POLICE', name: 'Metropolitan / Range Admin (CP/IGP)',
+      description: 'Commissionerate & Range Level Governance', clearance_required: 'SECRET',
+      office_type_id: 'COMMISSIONERATE', default_role_id: 'POLICE_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'POL_L3_DIV', level_number: 3, body_id: 'POLICE', name: 'Divisional / District Admin (DCP/SP)',
+      description: 'Zonal & District Command Authority', clearance_required: 'SECRET',
+      office_type_id: 'DIVISION', default_role_id: 'POLICE_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'POL_L4_STATION', level_number: 4, body_id: 'POLICE', name: 'Station SHO Admin (PI/Senior Officer)',
+      description: 'Police Station / Outpost Unit Administrator', clearance_required: 'CONFIDENTIAL',
+      office_type_id: 'POLICE_STATION', default_role_id: 'POLICE_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'POL_L5_DESK', level_number: 5, body_id: 'POLICE', name: 'Section / Special Desk Admin (PSI/Desk)',
+      description: 'Cyber / SOG / Evidence Desk Administrator', clearance_required: 'CONFIDENTIAL',
+      office_type_id: 'SPECIAL_WING', default_role_id: 'POLICE_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: false, can_create_sub_offices: false, can_approve_tickets: true
+    },
+    {
+      id: 'JUD_L1_HIGH_COURT', level_number: 1, body_id: 'JUDICIARY', name: 'High Court Apex Admin (Registrar General)',
+      description: 'Apex Judiciary Command & Registry Authority', clearance_required: 'TOP_SECRET',
+      office_type_id: 'HIGH_COURT', default_role_id: 'JUDICIARY_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'JUD_L2_DISTRICT', level_number: 2, body_id: 'JUDICIARY', name: 'Principal District Judge Admin',
+      description: 'District & Sessions Court Administration', clearance_required: 'SECRET',
+      office_type_id: 'DISTRICT_COURT', default_role_id: 'JUDICIARY_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'JUD_L3_SUBDIV', level_number: 3, body_id: 'JUDICIARY', name: 'Sub-Divisional Court Admin',
+      description: 'Taluka & Sub-Divisional Court Governance', clearance_required: 'SECRET',
+      office_type_id: 'TALUKA_COURT', default_role_id: 'JUDICIARY_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'JUD_L4_MAGISTRATE', level_number: 4, body_id: 'JUDICIARY', name: 'Court Unit / Registry Admin',
+      description: 'JMFC & Court Registry Section Admin', clearance_required: 'CONFIDENTIAL',
+      office_type_id: 'EXECUTIVE_MAGISTRACY', default_role_id: 'JUDICIARY_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: false, can_create_sub_offices: false, can_approve_tickets: true
+    },
+    {
+      id: 'FOR_L1_DIRECTOR', level_number: 1, body_id: 'FORENSICS', name: 'Directorate Apex Admin (Director SFSL)',
+      description: 'Statewide Forensic Science Directorate Command', clearance_required: 'TOP_SECRET',
+      office_type_id: 'STATE_FSL_HQ', default_role_id: 'FORENSIC_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'FOR_L2_REGIONAL', level_number: 2, body_id: 'FORENSICS', name: 'Regional Lab Admin (Joint/Addl Director)',
+      description: 'Regional Forensic Science Lab Governance', clearance_required: 'SECRET',
+      office_type_id: 'REGIONAL_FSL', default_role_id: 'FORENSIC_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'FOR_L3_DIVISION', level_number: 3, body_id: 'FORENSICS', name: 'Scientific Division Admin (Assistant Director)',
+      description: 'Ballistics, DNA, Cyber Lab Division Head', clearance_required: 'SECRET',
+      office_type_id: 'SCIENTIFIC_DIVISION', default_role_id: 'FORENSIC_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: true, can_create_sub_offices: true, can_approve_tickets: true
+    },
+    {
+      id: 'FOR_L4_MOBILE', level_number: 4, body_id: 'FORENSICS', name: 'District Mobile Unit Admin (SSO)',
+      description: 'Mobile Forensic Scene-of-Crime Unit Admin', clearance_required: 'CONFIDENTIAL',
+      office_type_id: 'MOBILE_FSL', default_role_id: 'FORENSIC_ADMIN',
+      manages_office_users: true, manages_subordinate_admins: false, can_create_sub_offices: false, can_approve_tickets: true
+    },
   ];
 
   for (const al of adminLevels) {
     await query(`
-      INSERT INTO admin_levels (id, level_number, body_id, name, description, clearance_required, can_manage_subordinates)
-      VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+      INSERT INTO admin_levels (
+        id, level_number, body_id, name, description, clearance_required,
+        office_type_id, default_role_id, manages_office_users, manages_subordinate_admins,
+        can_create_sub_offices, can_approve_tickets, can_manage_subordinates
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, TRUE)
       ON CONFLICT (id) DO UPDATE
-      SET level_number = EXCLUDED.level_number, body_id = EXCLUDED.body_id, name = EXCLUDED.name,
-          description = EXCLUDED.description, clearance_required = EXCLUDED.clearance_required;
-    `, [al.id, al.level_number, al.body_id, al.name, al.description, al.clearance_required]);
+      SET level_number = EXCLUDED.level_number,
+          body_id = EXCLUDED.body_id,
+          name = EXCLUDED.name,
+          description = EXCLUDED.description,
+          clearance_required = EXCLUDED.clearance_required,
+          office_type_id = EXCLUDED.office_type_id,
+          default_role_id = EXCLUDED.default_role_id,
+          manages_office_users = EXCLUDED.manages_office_users,
+          manages_subordinate_admins = EXCLUDED.manages_subordinate_admins,
+          can_create_sub_offices = EXCLUDED.can_create_sub_offices,
+          can_approve_tickets = EXCLUDED.can_approve_tickets;
+    `, [
+      al.id, al.level_number, al.body_id, al.name, al.description, al.clearance_required,
+      al.office_type_id, al.default_role_id, al.manages_office_users, al.manages_subordinate_admins,
+      al.can_create_sub_offices, al.can_approve_tickets
+    ]);
   }
 
   // 1e. Seed Institutional Organization Tags

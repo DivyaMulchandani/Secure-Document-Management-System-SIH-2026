@@ -183,6 +183,9 @@ router.get('/admin-levels', requireAuth, async (req: Request, res: Response) => 
   const levelsRes = await query(`
     SELECT al.id, al.level_number, al.body_id, al.name, al.description,
            al.clearance_required, al.can_manage_subordinates, al.created_at,
+           al.office_type_id, al.default_role_id, al.manages_office_users,
+           al.manages_subordinate_admins, al.can_create_sub_offices,
+           al.can_approve_tickets, al.max_clearance_allowed,
            b.name as body_name,
            (SELECT COUNT(*) FROM organization_nodes o WHERE o.admin_level_id = al.id) as mapped_office_count,
            (SELECT COUNT(*) FROM users u JOIN organization_nodes o ON u.primary_organization_id = o.id WHERE o.admin_level_id = al.id AND (u.is_layer_admin = TRUE OR u.primary_role_id LIKE '%ADMIN%')) as admin_count
@@ -206,15 +209,20 @@ router.get('/admin-levels', requireAuth, async (req: Request, res: Response) => 
   });
 
   return res.json({
+    levels: levelsRes.rows,
     adminLevels: levelsRes.rows,
     grouped,
   });
 });
 
-// POST /api/organizations/admin-levels - Define or update an admin level
+// POST /api/organizations/admin-levels - Define or update an admin level with decision-making authority
 router.post('/admin-levels', requireAuth, async (req: Request, res: Response) => {
   const user = req.userSession!;
-  const { id, levelNumber, bodyId, name, description, clearanceRequired } = req.body;
+  const {
+    id, levelNumber, bodyId, name, description, clearanceRequired,
+    officeTypeId, defaultRoleId, managesOfficeUsers, managesSubordinateAdmins,
+    canCreateSubOffices, canApproveTickets, maxClearanceAllowed
+  } = req.body;
 
   if (!levelNumber || !bodyId || !name) {
     return res.status(400).json({ error: 'Validation Error', message: 'levelNumber, bodyId, and name are required' });
@@ -229,13 +237,33 @@ router.post('/admin-levels', requireAuth, async (req: Request, res: Response) =>
 
   try {
     const ins = await query(`
-      INSERT INTO admin_levels (id, level_number, body_id, name, description, clearance_required, can_manage_subordinates)
-      VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+      INSERT INTO admin_levels (
+        id, level_number, body_id, name, description, clearance_required,
+        office_type_id, default_role_id, manages_office_users, manages_subordinate_admins,
+        can_create_sub_offices, can_approve_tickets, max_clearance_allowed, can_manage_subordinates
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, TRUE)
       ON CONFLICT (id) DO UPDATE
-      SET level_number = EXCLUDED.level_number, body_id = EXCLUDED.body_id, name = EXCLUDED.name,
-          description = EXCLUDED.description, clearance_required = EXCLUDED.clearance_required
+      SET level_number = EXCLUDED.level_number,
+          body_id = EXCLUDED.body_id,
+          name = EXCLUDED.name,
+          description = EXCLUDED.description,
+          clearance_required = EXCLUDED.clearance_required,
+          office_type_id = EXCLUDED.office_type_id,
+          default_role_id = EXCLUDED.default_role_id,
+          manages_office_users = EXCLUDED.manages_office_users,
+          manages_subordinate_admins = EXCLUDED.manages_subordinate_admins,
+          can_create_sub_offices = EXCLUDED.can_create_sub_offices,
+          can_approve_tickets = EXCLUDED.can_approve_tickets,
+          max_clearance_allowed = EXCLUDED.max_clearance_allowed
       RETURNING *;
-    `, [levelId, parseInt(levelNumber, 10), bodyId.toUpperCase(), name, description || '', clearanceRequired || 'SECRET']);
+    `, [
+      levelId, parseInt(levelNumber, 10), bodyId.toUpperCase(), name, description || '', clearanceRequired || 'SECRET',
+      officeTypeId || null, defaultRoleId || null,
+      managesOfficeUsers !== false, managesSubordinateAdmins !== false,
+      canCreateSubOffices !== false, canApproveTickets !== false,
+      maxClearanceAllowed || clearanceRequired || 'SECRET'
+    ]);
 
     await query(`
       INSERT INTO audit_logs (
@@ -245,10 +273,48 @@ router.post('/admin-levels', requireAuth, async (req: Request, res: Response) =>
       VALUES ($1, $1, $2, $2, $3, 'ADMIN_LEVEL_CONFIGURED', 'ADMIN_LEVEL', $4, 'ALLOW', $5, $6, json_build_object('name', $7::text, 'level', $8::int));
     `, [user.userId, user.organizationId, bodyId, levelId, req.ip, req.headers['user-agent'], name, levelNumber]);
 
-    return res.status(201).json({ success: true, adminLevel: ins.rows[0] });
+    return res.status(201).json({ success: true, adminLevel: ins.rows[0], level: ins.rows[0] });
   } catch (err: any) {
     return res.status(500).json({ error: 'Database Error', message: err.message });
   }
+});
+
+// DELETE /api/organizations/admin-levels/:id - Safely delete an admin level
+router.delete('/admin-levels/:id', requireAuth, async (req: Request, res: Response) => {
+  const user = req.userSession!;
+  const levelId = req.params.id;
+
+  const alRes = await query(`SELECT * FROM admin_levels WHERE id = $1;`, [levelId]);
+  if (alRes.rows.length === 0) {
+    return res.status(404).json({ error: 'Not Found', message: 'Admin level not found' });
+  }
+
+  const al = alRes.rows[0];
+  const isMaster = user.roleId === 'MASTER_ADMIN' || user.roleId === 'SYSTEM_MASTER_ADMIN';
+  if (!isMaster && user.agencyBranch !== al.body_id) {
+    return res.status(403).json({ error: 'Access Denied', message: 'Cannot delete admin levels of another sovereign body' });
+  }
+
+  const mappedCountRes = await query(`SELECT COUNT(*) as count FROM organization_nodes WHERE admin_level_id = $1;`, [levelId]);
+  const mappedCount = parseInt(mappedCountRes.rows[0].count, 10);
+  if (mappedCount > 0) {
+    return res.status(400).json({
+      error: 'Dependency Violation',
+      message: `Cannot delete hierarchy level '${al.name}': ${mappedCount} office(s) are currently mapped to this tier. Reassign or unmap offices first.`
+    });
+  }
+
+  await query(`DELETE FROM admin_levels WHERE id = $1;`, [levelId]);
+
+  await query(`
+    INSERT INTO audit_logs (
+      user_id, actor_user_id, organization_id, organization_node_id, body_id,
+      action, resource_type, resource_id, result, ip_address, user_agent, metadata
+    )
+    VALUES ($1, $1, $2, $2, $3, 'ADMIN_LEVEL_DELETED', 'ADMIN_LEVEL', $4, 'ALLOW', $5, $6, json_build_object('name', $7::text));
+  `, [user.userId, user.organizationId, al.body_id, levelId, req.ip, req.headers['user-agent'], al.name]);
+
+  return res.json({ success: true, message: `Admin hierarchy level '${al.name}' deleted successfully.` });
 });
 
 // PUT /api/organizations/nodes/:id/admin-level - Map admin level to office node
@@ -571,6 +637,210 @@ async function handleGetNodeDetails(req: Request, res: Response) {
   });
 }
 
+// GET /api/organizations/nodes/:id/tracking - Complete authority map and audit/ticket tracking for an office
+async function handleGetNodeTracking(req: Request, res: Response) {
+  const user = req.userSession!;
+  const nodeId = req.params.id;
+
+  const nodeRes = await query(`
+    SELECT o.id, o.parent_id, o.body_id, o.agency_branch, o.type_id, o.node_type_id, o.name, o.code,
+           o.hierarchy_path, o.level, o.jurisdiction_area, o.status, o.metadata, o.admin_level_id, o.created_at, o.updated_at,
+           t.name as type_name, b.name as body_name,
+           al.name as admin_level_name, al.level_number as admin_level_number,
+           al.manages_office_users, al.manages_subordinate_admins, al.can_create_sub_offices, al.can_approve_tickets, al.max_clearance_allowed,
+           p.name as parent_name, p.code as parent_code
+    FROM organization_nodes o
+    LEFT JOIN organization_types t ON o.type_id = t.id
+    LEFT JOIN organization_bodies b ON o.body_id = b.id
+    LEFT JOIN admin_levels al ON o.admin_level_id = al.id
+    LEFT JOIN organization_nodes p ON o.parent_id = p.id
+    WHERE o.id = $1;
+  `, [nodeId]);
+
+  if (nodeRes.rows.length === 0) {
+    return res.status(404).json({ error: 'Not Found', message: 'Organization node not found' });
+  }
+
+  const node = nodeRes.rows[0];
+
+  const isMaster = user.roleId === 'MASTER_ADMIN' || user.roleId === 'SYSTEM_MASTER_ADMIN';
+  const isWithinAgency = isMaster || user.agencyBranch === node.body_id;
+  if (!isWithinAgency) {
+    return res.status(403).json({
+      error: 'Access Denied',
+      message: `Cross-Agency Boundary: You cannot inspect tracking records for ${node.body_id} offices.`,
+    });
+  }
+
+  // 1. Direct Office Administrators (Administrators directly stationed at this office)
+  const directAdminsRes = await query(`
+    SELECT u.id, u.username, u.display_name, u.badge_number, u.government_id, u.designation,
+           u.phone_number, u.email, u.status, u.is_layer_admin, u.clearance_level,
+           r.id as role_id, r.name as role_name
+    FROM users u
+    JOIN roles r ON u.primary_role_id = r.id
+    WHERE u.primary_organization_id = $1::uuid AND (u.is_layer_admin = TRUE OR r.id LIKE '%ADMIN%')
+    ORDER BY u.display_name ASC;
+  `, [nodeId]);
+
+  // 2. Supervising Parent Chain Administrators (Ancestors who hold supervisory authority over this office)
+  const supervisingAdminsRes = await query(`
+    SELECT u.id, u.username, u.display_name, u.badge_number, u.government_id, u.designation,
+           u.phone_number, u.email, u.status, u.is_layer_admin, u.clearance_level,
+           r.id as role_id, r.name as role_name,
+           o.id as office_id, o.name as office_name, o.code as office_code, o.level as office_level,
+           al.name as admin_level_name, al.level_number as admin_level_number
+    FROM users u
+    JOIN roles r ON u.primary_role_id = r.id
+    JOIN organization_nodes o ON u.primary_organization_id = o.id
+    LEFT JOIN admin_levels al ON o.admin_level_id = al.id
+    WHERE o.id != $1::uuid
+      AND $2 LIKE (o.hierarchy_path || '.%')
+      AND (u.is_layer_admin = TRUE OR r.id LIKE '%ADMIN%' OR r.id IN ('CHIEF_OF_POLICE', 'JUDGE_CHIEF', 'DIRECTOR_FSL'))
+      AND u.status = 'ACTIVE'
+    ORDER BY o.level ASC, u.display_name ASC;
+  `, [nodeId, node.hierarchy_path]);
+
+  // 3. System Master Administrators (Universal Cross-Agency Superusers)
+  const masterAdminsRes = await query(`
+    SELECT u.id, u.username, u.display_name, u.badge_number, u.government_id, u.designation,
+           u.email, u.status, r.id as role_id, r.name as role_name
+    FROM users u
+    JOIN roles r ON u.primary_role_id = r.id
+    WHERE r.id IN ('MASTER_ADMIN', 'SYSTEM_MASTER_ADMIN') AND u.status = 'ACTIVE'
+    ORDER BY u.display_name ASC;
+  `);
+
+  // 4. Governance & Authority Rules
+  const governanceRules = {
+    targetOffice: {
+      id: node.id,
+      name: node.name,
+      code: node.code,
+      bodyId: node.body_id,
+      level: node.level,
+      adminLevelName: node.admin_level_name,
+      adminLevelNumber: node.admin_level_number,
+    },
+    directAdminPrivileges: {
+      canManageOfficeUsers: node.manages_office_users ?? true,
+      canCreateSubOffices: node.can_create_sub_offices ?? false,
+      canApproveTickets: node.can_approve_tickets ?? false,
+      maxClearanceAllowed: node.max_clearance_allowed ?? 'SECRET',
+      scope: 'Restricted strictly to this office unit.',
+    },
+    supervisoryChainPrivileges: {
+      count: supervisingAdminsRes.rows.length,
+      scope: 'All superior tiers in the hierarchy tree retain lawful oversight and ticket execution privileges.',
+      policy: 'Downward oversight only; peer and lower units have NO authority.',
+    },
+    isolationRules: [
+      { rule: 'Sibling Isolation', description: 'Lateral/peer offices cannot modify or inspect mutating records of this office.' },
+      { rule: 'Subordinate Block', description: 'Offices lower in the hierarchy tree cannot make changes to parent offices.' },
+      { rule: 'Inter-Agency Boundary', description: `Only ${node.body_id} and Sovereign Master administrators possess jurisdiction.` },
+      { rule: 'Compulsory Ticket Required', description: 'Every office creation, status change, or staff assignment requires a verified TCK-YYYY ticket with OTP authorization.' }
+    ]
+  };
+
+  // 5. Update Tickets Ledger for this Office
+  const ticketsRes = await query(`
+    SELECT t.id, t.ticket_number, t.action_type, t.target_resource_type, t.target_resource_id,
+           t.requester_user_id, t.requester_email, t.requester_government_id, t.requester_name,
+           t.justification, t.payload, t.before_state, t.status,
+           t.verified_at, t.executed_at, t.created_at, t.updated_at,
+           u.display_name as requester_display_name, u.badge_number as requester_badge,
+           r.name as requester_role_name
+    FROM update_tickets t
+    LEFT JOIN users u ON t.requester_user_id = u.id
+    LEFT JOIN roles r ON u.primary_role_id = r.id
+    WHERE t.target_resource_id = $1::text OR t.organization_id = $1::uuid
+    ORDER BY t.created_at DESC
+    LIMIT 50;
+  `, [nodeId]);
+
+  // 6. Administrative Activity Feed (Mutational changes to this office)
+  const adminActivityRes = await query(`
+    SELECT al.id, al.timestamp, al.action, al.resource_type, al.resource_id, al.result,
+           al.before_value, al.after_value, al.metadata, al.ip_address, al.user_agent,
+           u.id as actor_id, u.display_name as actor_name, u.username as actor_username,
+           u.badge_number as actor_badge, u.government_id as actor_government_id,
+           r.name as actor_role_name,
+           COALESCE(al.metadata->>'ticketNumber', al.metadata->>'ticket_number', '') as ticket_number,
+           COALESCE(al.metadata->>'justification', '') as justification
+    FROM audit_logs al
+    LEFT JOIN users u ON (al.actor_user_id = u.id OR al.user_id = u.id)
+    LEFT JOIN roles r ON u.primary_role_id = r.id
+    WHERE (
+      al.organization_node_id = $1::uuid
+      OR al.organization_id = $1::uuid
+      OR al.resource_id = $1::text
+      OR al.metadata->>'targetResourceId' = $1::text
+      OR al.metadata->>'target_node_id' = $1::text
+    )
+    AND al.action IN (
+      'OFFICE_CREATED', 'NODE_CREATED', 'NODE_UPDATED', 'NODE_STATUS_UPDATED', 'NODE_DISABLED',
+      'NODE_DELETED', 'OFFICE_ADMIN_LEVEL_MAPPED', 'TAG_ATTACHED', 'TAG_DETACHED',
+      'USER_CREATED', 'USER_UPDATED', 'USER_STATUS_UPDATED', 'USER_DELETED',
+      'TICKET_CREATED', 'TICKET_VERIFIED', 'TICKET_EXECUTED', 'ADMIN_LEVEL_MAPPED'
+    )
+    ORDER BY al.timestamp DESC
+    LIMIT 50;
+  `, [nodeId]);
+
+  // 7. Office Users Operational Activity Feed (Logins, Cases, Documents, Evidence, Delegations)
+  const userActivityRes = await query(`
+    SELECT al.id, al.timestamp, al.action, al.resource_type, al.resource_id, al.result,
+           al.metadata, al.ip_address,
+           u.id as user_id, u.display_name as user_name, u.badge_number as user_badge,
+           u.government_id as user_government_id, r.name as user_role_name,
+           c.fir_number as case_fir
+    FROM audit_logs al
+    LEFT JOIN users u ON al.user_id = u.id
+    LEFT JOIN roles r ON u.primary_role_id = r.id
+    LEFT JOIN cases c ON al.case_id = c.id
+    WHERE al.organization_id = $1::uuid
+      AND al.action NOT IN (
+        'OFFICE_CREATED', 'NODE_CREATED', 'NODE_UPDATED', 'NODE_STATUS_UPDATED', 'NODE_DISABLED',
+        'NODE_DELETED', 'OFFICE_ADMIN_LEVEL_MAPPED', 'TAG_ATTACHED', 'TAG_DETACHED'
+      )
+    ORDER BY al.timestamp DESC
+    LIMIT 50;
+  `, [nodeId]);
+
+  // 8. Statistics
+  const statsRes = await query(`
+    SELECT
+      (SELECT COUNT(*) FROM users WHERE primary_organization_id = $1::uuid AND status = 'ACTIVE') as active_users_count,
+      (SELECT COUNT(*) FROM users WHERE primary_organization_id = $1::uuid AND is_layer_admin = TRUE AND status = 'ACTIVE') as active_admins_count,
+      (SELECT COUNT(*) FROM organization_nodes WHERE parent_id = $1::uuid) as immediate_children_count,
+      (SELECT COUNT(*) FROM organization_nodes WHERE hierarchy_path LIKE ($2 || '.%')) as descendant_offices_count,
+      (SELECT COUNT(*) FROM update_tickets WHERE target_resource_id = $1::text OR organization_id = $1::uuid) as total_tickets_count
+  `, [nodeId, node.hierarchy_path]);
+
+  const stats = {
+    activeUsers: parseInt(statsRes.rows[0].active_users_count, 10) || 0,
+    activeAdmins: parseInt(statsRes.rows[0].active_admins_count, 10) || 0,
+    immediateChildren: parseInt(statsRes.rows[0].immediate_children_count, 10) || 0,
+    descendantOffices: parseInt(statsRes.rows[0].descendant_offices_count, 10) || 0,
+    totalTickets: parseInt(statsRes.rows[0].total_tickets_count, 10) || 0,
+  };
+
+  return res.json({
+    office: node,
+    governance: {
+      directAdministrators: directAdminsRes.rows,
+      supervisingAdministrators: supervisingAdminsRes.rows,
+      masterAdministrators: masterAdminsRes.rows,
+      rules: governanceRules,
+    },
+    tickets: ticketsRes.rows,
+    adminActivity: adminActivityRes.rows,
+    userActivity: userActivityRes.rows,
+    stats,
+  });
+}
+
+router.get('/nodes/:id/tracking', requireAuth, handleGetNodeTracking);
 router.get('/nodes/:id', requireAuth, handleGetNodeDetails);
 router.get('/:id', requireAuth, handleGetNodeDetails);
 
