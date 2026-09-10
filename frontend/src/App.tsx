@@ -15,6 +15,7 @@ import { Users } from './pages/Users';
 import { Delegations } from './pages/Delegations';
 import { Search } from './pages/Search';
 import { Audit } from './pages/Audit';
+import { Ledger } from './pages/Ledger';
 import { Tickets } from './pages/Tickets';
 import { AdminHierarchy } from './pages/AdminHierarchy';
 
@@ -158,6 +159,14 @@ const App: React.FC = () => {
             element={
               <ProtectedRoute requiredPermission="AUDIT_READ">
                 <Audit />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/ledger"
+            element={
+              <ProtectedRoute requiredPermission="AUDIT_READ">
+                <Ledger />
               </ProtectedRoute>
             }
           />

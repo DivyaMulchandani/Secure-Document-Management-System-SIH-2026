@@ -2,17 +2,31 @@ import { Pool, PoolClient } from 'pg';
 import path from 'path';
 import dotenv from 'dotenv';
 
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+// Project-root .env (this file lives at backend/src/services, and at
+// backend/dist/services once compiled -- both resolve ../../../.env to the
+// repo root). Loading it here too means standalone scripts (seed, tests)
+// that import this module directly still get the real configuration.
+dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
+// Fail fast rather than fall back to a hardcoded credential. A missing DB
+// password in any environment is a deployment error, not something to paper over.
+if (!process.env.DB_PASSWORD) {
+  throw new Error(
+    'DB_PASSWORD is not set. Refusing to start with an implicit/blank database credential. ' +
+    'Set DB_PASSWORD in the environment (see .env.example).'
+  );
+}
 
 export const pool = new Pool({
   host: process.env.DB_HOST || '127.0.0.1',
   port: parseInt(process.env.DB_PORT || '5432', 10),
   database: process.env.DB_NAME || 'casevault',
   user: process.env.DB_USER || 'casevault',
-  password: process.env.DB_PASSWORD || 't0rr3rdbmz7!P9xw',
+  password: process.env.DB_PASSWORD,
   max: 25,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
 });
 
 export async function query(text: string, params?: any[]) {
@@ -50,9 +64,21 @@ export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>)
   }
 }
 
+// Distinct from the ledger's per-transaction advisory lock key (915823):
+// this one guards schema initialization itself so two processes/tests
+// starting at once serialize instead of deadlocking against each other's
+// DDL (this was the root cause behind the reported 40P01 deadlock -- the
+// large multi-table ALTER/CREATE INDEX/CREATE TRIGGER block below taking
+// locks in different orders across concurrent initDatabase() callers).
+const SCHEMA_INIT_ADVISORY_LOCK_KEY = 715900;
+
 export async function initDatabase(): Promise<void> {
   const client = await pool.connect();
   try {
+    // Session-level advisory lock: blocks other initDatabase() callers
+    // (another dev server, a test suite, etc.) until this one finishes and
+    // releases it, rather than letting two large DDL transactions collide.
+    await client.query('SELECT pg_advisory_lock($1);', [SCHEMA_INIT_ADVISORY_LOCK_KEY]);
     await client.query(`
       CREATE SCHEMA IF NOT EXISTS investigation;
       SET search_path TO investigation, public;
@@ -685,6 +711,18 @@ export async function initDatabase(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_ledger_ref ON ledger_blocks(event_ref_table, event_ref_id);
       CREATE INDEX IF NOT EXISTS idx_ledger_case ON ledger_blocks(case_id);
 
+      -- merkle_root over this block's own event leaf-set. For the current
+      -- single-event-per-block design this equals leafHash(block_hash), but the
+      -- column is future-proof for batching several events into one block. The
+      -- cross-block Merkle structure that powers inclusion proofs lives in
+      -- ledger_checkpoints below.
+      ALTER TABLE ledger_blocks ADD COLUMN IF NOT EXISTS merkle_root CHAR(64);
+
+      -- Consensus finality state (Phase 3): a block is PROPOSED until a quorum of
+      -- sovereign bodies has co-signed it, then FINAL. Existing rows predate this
+      -- and are treated as FINAL (NULL => legacy-final) so verification stays green.
+      ALTER TABLE ledger_blocks ADD COLUMN IF NOT EXISTS consensus_state VARCHAR(16);
+
       -- Append-only enforcement at the DATABASE level for the ledger: even a direct
       -- UPDATE/DELETE with the app's own role (or a mistaken query) is rejected.
       -- This is the database-permission-independent tamper barrier: the ledger
@@ -697,10 +735,93 @@ export async function initDatabase(): Promise<void> {
       END;
       $reject$ LANGUAGE plpgsql;
 
+      -- The append-only trigger below must NOT block the consensus-finality
+      -- UPDATE that flips a PROPOSED block to FINAL and records co-signatures.
+      -- We therefore protect the immutable, hashed content columns column-by-column
+      -- and leave consensus_state / the co-signature side-table mutable. Any
+      -- attempt to alter seq/hashes/payload after insert is still rejected, so
+      -- tamper-evidence is unchanged.
+      CREATE OR REPLACE FUNCTION investigation.reject_ledger_content_mutation() RETURNS trigger AS $rlc$
+      BEGIN
+        IF TG_OP = 'DELETE' THEN
+          RAISE EXCEPTION 'append-only table: DELETE on ledger_blocks is not permitted'
+            USING ERRCODE = 'insufficient_privilege';
+        END IF;
+        IF NEW.seq IS DISTINCT FROM OLD.seq
+           OR NEW.prev_hash IS DISTINCT FROM OLD.prev_hash
+           OR NEW.payload_hash IS DISTINCT FROM OLD.payload_hash
+           OR NEW.block_hash IS DISTINCT FROM OLD.block_hash
+           OR NEW.event_type IS DISTINCT FROM OLD.event_type
+           OR NEW.event_ref_table IS DISTINCT FROM OLD.event_ref_table
+           OR NEW.event_ref_id IS DISTINCT FROM OLD.event_ref_id
+           OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+          RAISE EXCEPTION 'append-only table: immutable ledger columns cannot be modified'
+            USING ERRCODE = 'insufficient_privilege';
+        END IF;
+        RETURN NEW;
+      END;
+      $rlc$ LANGUAGE plpgsql;
+
       DROP TRIGGER IF EXISTS trg_ledger_blocks_append_only ON ledger_blocks;
       CREATE TRIGGER trg_ledger_blocks_append_only
         BEFORE UPDATE OR DELETE ON ledger_blocks
+        FOR EACH ROW EXECUTE FUNCTION investigation.reject_ledger_content_mutation();
+
+      -- 24c. Merkle checkpoints: each row commits a contiguous window of blocks
+      -- [from_seq, to_seq] to a single Merkle root. Inclusion proofs are issued
+      -- against these roots, and it is these roots (plus the tip hash) that get
+      -- published to an external anchor (Phase 2). Fully append-only.
+      CREATE TABLE IF NOT EXISTS ledger_checkpoints (
+        id BIGSERIAL PRIMARY KEY,
+        checkpoint_seq BIGINT NOT NULL UNIQUE,   -- monotonic, independent of block seq
+        from_seq BIGINT NOT NULL,
+        to_seq BIGINT NOT NULL,
+        block_count INT NOT NULL,
+        merkle_root CHAR(64) NOT NULL,           -- root over block_hashes in [from_seq,to_seq]
+        tip_block_hash CHAR(64) NOT NULL,        -- block_hash at to_seq (chain tip at checkpoint time)
+        prev_checkpoint_root CHAR(64),           -- links checkpoints into their own chain
+        created_by UUID,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_checkpoint_range ON ledger_checkpoints(from_seq, to_seq);
+
+      DROP TRIGGER IF EXISTS trg_ledger_checkpoints_append_only ON ledger_checkpoints;
+      CREATE TRIGGER trg_ledger_checkpoints_append_only
+        BEFORE UPDATE OR DELETE ON ledger_checkpoints
         FOR EACH ROW EXECUTE FUNCTION investigation.reject_mutation();
+
+      -- 24d. Block co-signatures: each sovereign body that independently
+      -- re-validated a block records its Ed25519 signature here. Quorum of
+      -- distinct bodies => block becomes FINAL. Append-only (votes are permanent).
+      CREATE TABLE IF NOT EXISTS ledger_block_signatures (
+        id BIGSERIAL PRIMARY KEY,
+        block_seq BIGINT NOT NULL REFERENCES ledger_blocks(seq) ON DELETE RESTRICT,
+        body_id VARCHAR(32) NOT NULL,            -- POLICE / JUDICIARY / FORENSICS / MASTER
+        signature TEXT NOT NULL,                 -- Ed25519 over block_hash by that body's key
+        signed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (block_seq, body_id)              -- one vote per body per block
+      );
+      CREATE INDEX IF NOT EXISTS idx_block_sig_seq ON ledger_block_signatures(block_seq);
+
+      DROP TRIGGER IF EXISTS trg_ledger_block_sigs_append_only ON ledger_block_signatures;
+      CREATE TRIGGER trg_ledger_block_sigs_append_only
+        BEFORE UPDATE OR DELETE ON ledger_block_signatures
+        FOR EACH ROW EXECUTE FUNCTION investigation.reject_mutation();
+
+      -- 24e. External anchors (Phase 2): periodic publication of a checkpoint root
+      -- to an out-of-band notary/timestamp target, so history cannot be silently
+      -- rewritten even by a full database owner. Stores the receipt, never PII.
+      CREATE TABLE IF NOT EXISTS ledger_anchors (
+        id BIGSERIAL PRIMARY KEY,
+        checkpoint_seq BIGINT NOT NULL REFERENCES ledger_checkpoints(checkpoint_seq) ON DELETE RESTRICT,
+        anchored_root CHAR(64) NOT NULL,
+        anchor_target VARCHAR(64) NOT NULL,      -- e.g. RFC3161_TSA, OPENTIMESTAMPS, LOCAL_NOTARY
+        anchor_reference TEXT,                   -- external id / URL / serial from the target
+        anchor_receipt TEXT,                     -- opaque proof blob (base64), verifiable out-of-band
+        status VARCHAR(16) NOT NULL DEFAULT 'CONFIRMED', -- PENDING | CONFIRMED | FAILED
+        anchored_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_anchor_checkpoint ON ledger_anchors(checkpoint_seq);
 
       -- 25. System Settings
       CREATE TABLE IF NOT EXISTS system_settings (
@@ -717,6 +838,11 @@ export async function initDatabase(): Promise<void> {
       ON CONFLICT (key) DO NOTHING;
     `);
   } finally {
+    try {
+      await client.query('SELECT pg_advisory_unlock($1);', [SCHEMA_INIT_ADVISORY_LOCK_KEY]);
+    } catch {
+      /* connection may already be broken; pool will discard it */
+    }
     client.release();
   }
 }

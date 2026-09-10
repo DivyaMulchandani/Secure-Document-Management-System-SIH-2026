@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { PoolClient } from 'pg';
 import { query } from './db';
+import { merkleRoot, buildProof, MerkleProof } from './merkle';
 
 /**
  * Hash-chained, per-agency-signed integrity ledger.
@@ -58,14 +59,14 @@ function getBodyKeyPair(bodyId: string): { privateKeyPem: string; publicKeyPem: 
   };
 }
 
-function signBlock(bodyId: string, blockHash: string): string | null {
+export function signBlock(bodyId: string, blockHash: string): string | null {
   const kp = getBodyKeyPair(bodyId);
   if (!kp) return null;
   const sig = crypto.sign(null, Buffer.from(blockHash, 'hex'), kp.privateKeyPem);
   return sig.toString('base64');
 }
 
-function verifyBlockSignature(bodyId: string, blockHash: string, signatureB64: string | null): boolean {
+export function verifyBlockSignature(bodyId: string, blockHash: string, signatureB64: string | null): boolean {
   if (!signatureB64) return false;
   const kp = getBodyKeyPair(bodyId);
   if (!kp) return false;
@@ -126,16 +127,21 @@ export async function appendLedgerBlock(client: PoolClient, input: LedgerAppendI
   const blockHash = computeBlockHash(prevHash, payloadHash, seq);
   const signature = signBlock(input.bodyId || 'MASTER', blockHash);
 
+  // Per-block Merkle root. Today one event => one leaf, so this is a single-leaf
+  // tree over block_hash; the column is ready for multi-event blocks later.
+  const blockMerkleRoot = merkleRoot([blockHash]);
+
   const res = await client.query(
     `INSERT INTO ledger_blocks (
        seq, prev_hash, event_type, event_ref_table, event_ref_id,
-       case_id, org_id, body_id, payload_hash, org_signature, block_hash, created_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       case_id, org_id, body_id, payload_hash, org_signature, block_hash,
+       merkle_root, consensus_state, created_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
      RETURNING id, seq, block_hash, created_at`,
     [
       seq, prevHash, input.eventType, input.refTable || null, input.refId != null ? String(input.refId) : null,
       input.caseId || null, input.orgId || null, (input.bodyId || 'MASTER').toUpperCase(),
-      payloadHash, signature, blockHash, createdAtIso,
+      payloadHash, signature, blockHash, blockMerkleRoot, 'PROPOSED', createdAtIso,
     ]
   );
   return res.rows[0];
@@ -204,4 +210,137 @@ export async function verifyRefChain(refTable: string, refId: string): Promise<{
     await query('SELECT COUNT(*)::int AS n FROM ledger_blocks WHERE event_ref_table = $1 AND event_ref_id = $2', [refTable, String(refId)])
   ).rows[0].n;
   return { verified: full.valid, blocks: count };
+}
+
+/* ------------------------------------------------------------------ *
+ *  MERKLE CHECKPOINTS & INCLUSION PROOFS
+ * ------------------------------------------------------------------ */
+
+export interface CheckpointResult {
+  checkpointSeq: number;
+  fromSeq: number;
+  toSeq: number;
+  blockCount: number;
+  merkleRoot: string;
+  tipBlockHash: string;
+  createdAt: string;
+}
+
+/**
+ * Seal every block newer than the last checkpoint into a new Merkle checkpoint.
+ * Runs under the same advisory lock as appends so no block can slip in between
+ * reading the window and committing the root. Returns null if there is nothing
+ * new to checkpoint.
+ */
+export async function createCheckpoint(client: PoolClient, createdBy?: string | null): Promise<CheckpointResult | null> {
+  await client.query('SELECT pg_advisory_xact_lock($1)', [LEDGER_ADVISORY_LOCK_KEY]);
+
+  const lastCp = (
+    await client.query('SELECT checkpoint_seq, to_seq, merkle_root FROM ledger_checkpoints ORDER BY checkpoint_seq DESC LIMIT 1')
+  ).rows[0];
+  const fromSeq = lastCp ? Number(lastCp.to_seq) + 1 : 1;
+
+  const blocks = (
+    await client.query(
+      'SELECT seq, block_hash FROM ledger_blocks WHERE seq >= $1 ORDER BY seq ASC',
+      [fromSeq]
+    )
+  ).rows;
+  if (blocks.length === 0) return null;
+
+  const toSeq = Number(blocks[blocks.length - 1].seq);
+  const root = merkleRoot(blocks.map((b) => b.block_hash));
+  const tipBlockHash = blocks[blocks.length - 1].block_hash;
+  const checkpointSeq = (lastCp ? Number(lastCp.checkpoint_seq) : 0) + 1;
+
+  const res = await client.query(
+    `INSERT INTO ledger_checkpoints
+       (checkpoint_seq, from_seq, to_seq, block_count, merkle_root, tip_block_hash, prev_checkpoint_root, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+     RETURNING checkpoint_seq, from_seq, to_seq, block_count, merkle_root, tip_block_hash, created_at`,
+    [checkpointSeq, fromSeq, toSeq, blocks.length, root, tipBlockHash, lastCp ? lastCp.merkle_root : null, createdBy || null]
+  );
+  const r = res.rows[0];
+  return {
+    checkpointSeq: Number(r.checkpoint_seq),
+    fromSeq: Number(r.from_seq),
+    toSeq: Number(r.to_seq),
+    blockCount: Number(r.block_count),
+    merkleRoot: r.merkle_root,
+    tipBlockHash: r.tip_block_hash,
+    createdAt: r.created_at,
+  };
+}
+
+export interface InclusionProofResult {
+  found: boolean;
+  reason?: string;
+  blockSeq?: number;
+  blockHash?: string;
+  eventType?: string;
+  checkpointSeq?: number;         // present when proven against a sealed checkpoint
+  againstLiveTip?: boolean;       // true when no checkpoint covers it yet (proven vs current chain)
+  proof?: MerkleProof;
+}
+
+/**
+ * Produce a Merkle inclusion proof that the block anchoring (refTable, refId)
+ * is part of a committed root -- either a sealed checkpoint (preferred) or, if
+ * none covers it yet, the live chain window. The returned proof.root is the
+ * value a verifier compares against; verifyProof() recomputes it from leaf+path.
+ */
+export async function inclusionProof(refTable: string, refId: string): Promise<InclusionProofResult> {
+  const target = (
+    await query(
+      'SELECT seq, block_hash, event_type FROM ledger_blocks WHERE event_ref_table = $1 AND event_ref_id = $2 ORDER BY seq ASC LIMIT 1',
+      [refTable, String(refId)]
+    )
+  ).rows[0];
+  if (!target) return { found: false, reason: 'no ledger block anchors this record' };
+
+  const blockSeq = Number(target.seq);
+
+  const cp = (
+    await query(
+      'SELECT checkpoint_seq, from_seq, to_seq FROM ledger_checkpoints WHERE from_seq <= $1 AND to_seq >= $1 ORDER BY checkpoint_seq ASC LIMIT 1',
+      [blockSeq]
+    )
+  ).rows[0];
+
+  let windowFrom: number;
+  let windowTo: number;
+  let checkpointSeq: number | undefined;
+  let againstLiveTip = false;
+
+  if (cp) {
+    windowFrom = Number(cp.from_seq);
+    windowTo = Number(cp.to_seq);
+    checkpointSeq = Number(cp.checkpoint_seq);
+  } else {
+    // Not yet sealed: prove against the window since the last checkpoint (the
+    // live tip). Same math, root just isn't externally anchored yet.
+    const lastCp = (
+      await query('SELECT to_seq FROM ledger_checkpoints ORDER BY checkpoint_seq DESC LIMIT 1')
+    ).rows[0];
+    windowFrom = lastCp ? Number(lastCp.to_seq) + 1 : 1;
+    windowTo = Number((await query('SELECT MAX(seq) AS m FROM ledger_blocks')).rows[0].m);
+    againstLiveTip = true;
+  }
+
+  const windowBlocks = (
+    await query('SELECT seq, block_hash FROM ledger_blocks WHERE seq >= $1 AND seq <= $2 ORDER BY seq ASC', [windowFrom, windowTo])
+  ).rows;
+  const index = windowBlocks.findIndex((b) => Number(b.seq) === blockSeq);
+  if (index < 0) return { found: false, reason: 'block fell outside its checkpoint window' };
+
+  const proof = buildProof(windowBlocks.map((b) => b.block_hash), index);
+  return {
+    found: true,
+    blockSeq,
+    blockHash: target.block_hash,
+    eventType: target.event_type,
+    checkpointSeq,
+    againstLiveTip,
+    proof,
+  };
 }

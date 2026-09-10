@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { AgencyBadge } from './ClassificationBadge';
 import {
   ShieldIcon, ScaleIcon, FlaskIcon, FileTextIcon, UsersIcon,
-  BuildingIcon, SearchIcon, LockIcon, ActivityIcon, LogOutIcon, KeyIcon
+  BuildingIcon, SearchIcon, LockIcon, ActivityIcon, LogOutIcon, KeyIcon, LinkIcon
 } from './Icons';
 
 export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -35,6 +35,7 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
     { name: 'Action & Update Tickets', path: '/tickets', icon: FileTextIcon, visible: true },
     { name: 'Global Scoped Search', path: '/search', icon: SearchIcon, visible: true },
     { name: 'Immutable Audit Vault', path: '/audit', icon: LockIcon, visible: hasPermission('AUDIT_READ') || user?.roleId === 'MASTER_ADMIN' },
+    { name: 'Blockchain Explorer', path: '/ledger', icon: LinkIcon, visible: hasPermission('AUDIT_READ') || user?.roleId === 'MASTER_ADMIN' },
   ];
 
   return (
