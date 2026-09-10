@@ -59,11 +59,14 @@ export const Organizations: React.FC = () => {
   const [nodeA, setNodeA] = useState<any>(null);
   const [nodeB, setNodeB] = useState<any>(null);
 
+  // Administrative Layers
+  const [adminLevels, setAdminLevels] = useState<any[]>([]);
+
   // Modal: Add Child Org Node
   const [showAddModal, setShowAddModal] = useState(false);
   const [addForm, setAddForm] = useState({
     parentId: '',
-    typeId: '',
+    adminLevelId: '',
     name: '',
     code: '',
     jurisdictionArea: ''
@@ -108,14 +111,22 @@ export const Organizations: React.FC = () => {
     onSuccess: () => {},
   });
 
+  const fetchAdminLevels = async () => {
+    try {
+      const res = await api.get<{ adminLevels: any[] }>('/organizations/admin-levels');
+      if (res.adminLevels) {
+        setAdminLevels(res.adminLevels);
+      }
+    } catch (err) {
+      console.error('Failed to load admin levels:', err);
+    }
+  };
+
   const fetchNodeTypes = async () => {
     try {
       const res = await api.get<{ types: any[] }>('/organizations/node-types');
       if (res.types && res.types.length > 0) {
         setNodeTypes(res.types);
-        if (!addForm.typeId) {
-          setAddForm(prev => ({ ...prev, typeId: res.types[0].id }));
-        }
       }
     } catch (err) {
       console.error('Failed to load node types:', err);
@@ -179,6 +190,7 @@ export const Organizations: React.FC = () => {
   useEffect(() => {
     fetchNodeTypes();
     fetchOfficePositions();
+    fetchAdminLevels();
   }, []);
 
   useEffect(() => {
@@ -209,7 +221,8 @@ export const Organizations: React.FC = () => {
   const handleInitiateAddOrg = (e: React.FormEvent) => {
     e.preventDefault();
     const parentNode = nodes.find(n => n.id === (addForm.parentId || selectedNode?.id));
-    const selectedType = nodeTypes.find(t => t.id === addForm.typeId);
+    const availableLayers = adminLevels.filter(al => al.body_id === currentNodeBody);
+    const selectedLayer = adminLevels.find(al => al.id === addForm.adminLevelId) || availableLayers[0];
 
     setShowAddModal(false);
     setTicketModalConfig({
@@ -218,12 +231,17 @@ export const Organizations: React.FC = () => {
       actionType: 'CREATE_OFFICE',
       targetResourceType: 'ORGANIZATION_NODE',
       payload: {
-        ...addForm,
         parentId: addForm.parentId || selectedNode?.id,
+        adminLevelId: selectedLayer?.id,
+        name: addForm.name.trim(),
+        code: addForm.code.trim().toUpperCase(),
+        jurisdictionArea: addForm.jurisdictionArea.trim(),
       },
       summaryItems: [
         { label: 'Office Name', value: addForm.name },
-        { label: 'Office Position', value: selectedType?.name || addForm.typeId },
+        { label: 'Governance Layer', value: selectedLayer ? `Level ${selectedLayer.level_number}: ${selectedLayer.name}` : 'Unassigned Tier' },
+        { label: 'Office Type', value: selectedLayer?.office_type_name || selectedLayer?.office_type_id || 'OFFICE' },
+        { label: 'Managing Admin Role', value: selectedLayer?.default_role_name || selectedLayer?.default_role_id || 'OFFICE_ADMIN' },
         { label: 'Node Code', value: addForm.code },
         { label: 'Parent Unit', value: parentNode?.name || 'Selected Office' },
         { label: 'Jurisdiction', value: addForm.jurisdictionArea || 'Default Zone' },
@@ -231,7 +249,7 @@ export const Organizations: React.FC = () => {
       onSuccess: async () => {
         setAddForm({
           parentId: '',
-          typeId: nodeTypes[0]?.id || 'POLICE_STATION',
+          adminLevelId: '',
           name: '',
           code: '',
           jurisdictionArea: ''
@@ -529,11 +547,15 @@ export const Organizations: React.FC = () => {
           {activeTab === 'TREE' && selectedNode && permissions.canCreateChildNode && (
             <button
               onClick={() => {
-                const initialType = availablePositionsForCreation[0]?.id || nodeTypes[0]?.id || 'POLICE_STATION';
+                const layers = adminLevels.filter(al => al.body_id === currentNodeBody && al.level_number > (selectedNode.level || 1));
+                const fallbackLayers = adminLevels.filter(al => al.body_id === currentNodeBody);
+                const chosenLayer = layers[0] || fallbackLayers[0];
                 setAddForm({
-                  ...addForm,
                   parentId: selectedNode?.id || '',
-                  typeId: initialType
+                  adminLevelId: chosenLayer?.id || '',
+                  name: '',
+                  code: '',
+                  jurisdictionArea: ''
                 });
                 setShowAddModal(true);
               }}
@@ -705,10 +727,12 @@ export const Organizations: React.FC = () => {
                       {permissions.canCreateChildNode && (
                         <button
                           onClick={() => {
-                            const initialType = availablePositionsForCreation[0]?.id || nodeTypes[0]?.id || 'POLICE_STATION';
+                            const layers = adminLevels.filter(al => al.body_id === currentNodeBody && al.level_number > (selectedNode.level || 1));
+                            const fallbackLayers = adminLevels.filter(al => al.body_id === currentNodeBody);
+                            const chosenLayer = layers[0] || fallbackLayers[0];
                             setAddForm({
                               parentId: selectedNode.id,
-                              typeId: initialType,
+                              adminLevelId: chosenLayer?.id || '',
                               name: '',
                               code: '',
                               jurisdictionArea: ''
@@ -841,10 +865,12 @@ export const Organizations: React.FC = () => {
                       {permissions.canCreateChildNode && (
                         <button
                           onClick={() => {
-                            const initialType = availablePositionsForCreation[0]?.id || nodeTypes[0]?.id || 'POLICE_STATION';
+                            const layers = adminLevels.filter(al => al.body_id === currentNodeBody && al.level_number > (selectedNode.level || 1));
+                            const fallbackLayers = adminLevels.filter(al => al.body_id === currentNodeBody);
+                            const chosenLayer = layers[0] || fallbackLayers[0];
                             setAddForm({
                               parentId: selectedNode.id,
-                              typeId: initialType,
+                              adminLevelId: chosenLayer?.id || '',
                               name: '',
                               code: '',
                               jurisdictionArea: ''
@@ -1277,21 +1303,29 @@ export const Organizations: React.FC = () => {
               </div>
 
               <div>
-                <label className="block text-slate-300 mb-1 font-mono">Office Position / Role Type *</label>
-                <select
-                  required
-                  className="input-field font-mono"
-                  value={addForm.typeId}
-                  onChange={(e) => setAddForm({ ...addForm, typeId: e.target.value })}
-                >
-                  {availablePositionsForCreation.map((pt: any) => (
-                    <option key={pt.id} value={pt.id}>
-                      {pt.name} ({pt.code || pt.category})
-                    </option>
-                  ))}
-                </select>
+                <label className="block text-slate-300 mb-1 font-mono">Governing Layer (Admin Level) *</label>
+                {adminLevels.filter(al => al.body_id === currentNodeBody).length === 0 ? (
+                  <div className="p-2.5 rounded bg-amber-900/20 border border-amber-700/40 text-amber-300 font-mono text-[11px]">
+                    No layers defined for {currentNodeBody}. Please configure administrative layers in Admin Hierarchy first.
+                  </div>
+                ) : (
+                  <select
+                    required
+                    className="input-field font-mono text-xs"
+                    value={addForm.adminLevelId}
+                    onChange={(e) => setAddForm({ ...addForm, adminLevelId: e.target.value })}
+                  >
+                    {adminLevels
+                      .filter(al => al.body_id === currentNodeBody)
+                      .map((al: any) => (
+                        <option key={al.id} value={al.id}>
+                          Level {al.level_number}: {al.name} (Type: {al.office_type_name || al.office_type_id} • Admin: {al.default_role_name || al.default_role_id})
+                        </option>
+                      ))}
+                  </select>
+                )}
                 <p className="text-[10px] text-muted-text mt-1 font-mono">
-                  Sovereign branch: {currentNodeBody} • Office position determines organizational category & hierarchy level
+                  Sovereign branch: {currentNodeBody} • Office position and hierarchy level are inherited dynamically from the Layer
                 </p>
               </div>
 

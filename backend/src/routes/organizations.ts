@@ -187,10 +187,14 @@ router.get('/admin-levels', requireAuth, async (req: Request, res: Response) => 
            al.manages_subordinate_admins, al.can_create_sub_offices,
            al.can_approve_tickets, al.max_clearance_allowed,
            b.name as body_name,
+           ot.name as office_type_name,
+           r.name as default_role_name,
            (SELECT COUNT(*) FROM organization_nodes o WHERE o.admin_level_id = al.id) as mapped_office_count,
            (SELECT COUNT(*) FROM users u JOIN organization_nodes o ON u.primary_organization_id = o.id WHERE o.admin_level_id = al.id AND (u.is_layer_admin = TRUE OR u.primary_role_id LIKE '%ADMIN%')) as admin_count
     FROM admin_levels al
     LEFT JOIN organization_bodies b ON al.body_id = b.id
+    LEFT JOIN organization_types ot ON al.office_type_id = ot.id
+    LEFT JOIN roles r ON al.default_role_id = r.id
     ${whereClause}
     ORDER BY al.body_id ASC, al.level_number ASC;
   `, params);
@@ -1009,67 +1013,160 @@ router.put('/:id/status', requireAuth, handleUpdateNodeStatus);
 // Helper for creating node
 async function handleCreateNode(req: Request, res: Response) {
   const user = req.userSession!;
-  const { parentId, typeId, name, code, jurisdictionArea, metadata } = req.body;
+  const { ticketId, ticketNumber, otp, otpCode, parentId, adminLevelId, typeId, name, code, jurisdictionArea, metadata } = req.body;
+  const effectiveTicket = ticketId || ticketNumber;
+  const effectiveOtp = otp || otpCode;
 
-  if (!parentId || !typeId || !name || !code) {
-    return res.status(400).json({ error: 'Validation Error', message: 'Missing required fields' });
+  if (!effectiveTicket || !effectiveOtp) {
+    return res.status(403).json({
+      error: 'Ticket Authorization Required',
+      message: 'Compulsory LEA Update Ticket with OTP authorization is required to establish office nodes. Please initiate an update ticket via the Secure Ticket Gateway first.',
+      code: 'TICKET_REQUIRED',
+    });
   }
 
-  // Parent must exist
-  const parentRes = await query(`
-    SELECT id, hierarchy_path, level, agency_branch, body_id FROM organization_nodes WHERE id = $1;
-  `, [parentId]);
+  // Verify ticket
+  const ticketRes = await query(`
+    SELECT * FROM update_tickets 
+    WHERE (id::text = $1 OR ticket_number = $1)
+  `, [effectiveTicket]);
 
-  if (parentRes.rows.length === 0) {
-    return res.status(404).json({ error: 'Not Found', message: 'Parent organization not found' });
+  if (ticketRes.rows.length === 0) {
+    return res.status(404).json({ error: 'Not Found', message: 'Update ticket not found' });
   }
 
-  const parent = parentRes.rows[0];
+  const ticket = ticketRes.rows[0];
+  if (ticket.status === 'EXECUTED') {
+    return res.status(409).json({ error: 'Already Executed', message: `Ticket ${ticket.ticket_number} has already been executed.` });
+  }
+
+  if (ticket.status === 'REJECTED') {
+    return res.status(403).json({ error: 'Ticket Rejected', message: `Ticket ${ticket.ticket_number} has been rejected or cancelled.` });
+  }
+
+  if (new Date(ticket.otp_expires_at) < new Date()) {
+    return res.status(401).json({ error: 'Expired OTP', message: 'Authorization OTP has expired.' });
+  }
+
+  if (ticket.otp_code !== effectiveOtp.trim()) {
+    return res.status(401).json({ error: 'Invalid OTP', message: 'Incorrect 6-digit authorization code.' });
+  }
+
+  // Use payload from request body or ticket
+  const resolvedAdminLevelId = adminLevelId || ticket.payload?.adminLevelId;
+  const resolvedParentId = parentId || ticket.payload?.parentId;
+  const resolvedName = name || ticket.payload?.name;
+  const resolvedCode = code || ticket.payload?.code;
+  const resolvedArea = jurisdictionArea || ticket.payload?.jurisdictionArea || '';
+  const resolvedMetadata = metadata || ticket.payload?.metadata;
+
+  if (!resolvedName || !resolvedCode) {
+    return res.status(400).json({ error: 'Validation Error', message: 'Office Name and Code are required' });
+  }
+
+  // Resolve admin layer
+  let adminLevel: any = null;
+  if (resolvedAdminLevelId) {
+    const alRes = await query(`SELECT * FROM admin_levels WHERE id = $1;`, [resolvedAdminLevelId]);
+    if (alRes.rows.length === 0) {
+      return res.status(400).json({ error: 'Validation Error', message: `Selected layer (${resolvedAdminLevelId}) not found.` });
+    }
+    adminLevel = alRes.rows[0];
+  }
+
+  let parent: any = null;
+  if (resolvedParentId) {
+    const parentRes = await query(`
+      SELECT id, hierarchy_path, level, agency_branch, body_id FROM organization_nodes WHERE id = $1;
+    `, [resolvedParentId]);
+    if (parentRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Not Found', message: 'Parent office node not found' });
+    }
+    parent = parentRes.rows[0];
+  }
+
+  const targetBodyId = adminLevel ? adminLevel.body_id : (parent ? parent.body_id : (ticket.body_id || user.agencyBranch));
+  if (parent && parent.body_id !== targetBodyId) {
+    return res.status(403).json({
+      error: 'Institutional Boundary Violation',
+      message: `Cannot establish a ${targetBodyId} office under a ${parent.body_id} parent node.`
+    });
+  }
+
+  const resolvedLevel = adminLevel ? adminLevel.level_number : (parent ? parent.level + 1 : 1);
+  if (parent && parent.level >= resolvedLevel) {
+    return res.status(400).json({
+      error: 'Inverted Hierarchy Violation',
+      message: `Parent office level (${parent.level}) must be strictly lower than child layer level (${resolvedLevel}).`
+    });
+  }
+
+  if (!parent && resolvedLevel > 1) {
+    return res.status(400).json({
+      error: 'Parent Required',
+      message: `Parent office node is required for Level ${resolvedLevel} offices.`
+    });
+  }
 
   const isMaster = user.roleId === 'MASTER_ADMIN' || user.roleId === 'SYSTEM_MASTER_ADMIN';
-
-  // Non-master administrators must remain within their vertical subtree and agency branch
   if (!isMaster) {
-    if (parent.agency_branch !== user.agencyBranch) {
+    if (user.agencyBranch !== targetBodyId) {
       return res.status(403).json({
         error: 'Institutional Boundary Violation',
-        message: `Cannot create nodes in agency '${parent.agency_branch}' from agency '${user.agencyBranch}'.`,
+        message: `Cannot create office in agency '${targetBodyId}' from '${user.agencyBranch}'.`
       });
     }
-
-    const isWithinSubtree = parent.hierarchy_path === user.organizationPath ||
-      parent.hierarchy_path.startsWith(user.organizationPath + '.');
-    if (!isWithinSubtree) {
-      return res.status(403).json({
-        error: 'Access Denied',
-        message: 'Sibling Isolation Policy: You cannot create child nodes outside your descendant subtree.',
-      });
+    if (parent) {
+      const isWithinSubtree = parent.hierarchy_path === user.organizationPath ||
+        parent.hierarchy_path.startsWith(user.organizationPath + '.');
+      if (!isWithinSubtree) {
+        return res.status(403).json({
+          error: 'Access Denied',
+          message: 'Sibling Isolation Policy: You cannot create child nodes outside your descendant subtree.'
+        });
+      }
     }
   }
 
-  // Authorize creation
-  const authz = await authorize(user, 'ORG_CREATE', { type: 'ORG', owningOrgId: parentId }, {
-    ip: req.ip,
-    userAgent: req.headers['user-agent'],
-  });
-
-  if (!authz.allowed) {
-    return res.status(authz.statusCode).json({ error: 'Access Denied', message: authz.reason });
-  }
-
-  const cleanCode = code.toUpperCase().replace(/\s+/g, '-');
-  const pathPart = cleanCode.toLowerCase().replace(/-/g, '_');
-  const hierarchyPath = `${parent.hierarchy_path}.${pathPart}`;
-  const level = parent.level + 1;
+  const cleanCode = (resolvedCode || '').toUpperCase().replace(/[^A-Z0-9_-]/g, '-').replace(/-+/g, '-');
+  const pathPart = cleanCode.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+  const hierarchyPath = parent ? `${parent.hierarchy_path}.${pathPart}` : `${targetBodyId}.${pathPart}`;
+  const resolvedTypeId = adminLevel?.office_type_id || typeId || ticket.payload?.typeId || 'OFFICE';
+  const assignedAdminLevelId = adminLevel ? adminLevel.id : null;
 
   try {
     const newOrg = await query(`
       INSERT INTO organization_nodes (
-        parent_id, body_id, agency_branch, type_id, node_type_id, name, code, hierarchy_path, level, jurisdiction_area, metadata
+        parent_id, body_id, agency_branch, type_id, node_type_id, admin_level_id,
+        name, code, hierarchy_path, level, jurisdiction_area, metadata
       )
-      VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10)
+      VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *;
-    `, [parentId, parent.body_id, parent.agency_branch, typeId, name, cleanCode, hierarchyPath, level, jurisdictionArea || '', metadata ? JSON.stringify(metadata) : '{}']);
+    `, [
+      parent ? parent.id : null,
+      targetBodyId,
+      targetBodyId,
+      resolvedTypeId,
+      assignedAdminLevelId,
+      (resolvedName || '').trim(),
+      cleanCode,
+      hierarchyPath,
+      resolvedLevel,
+      resolvedArea,
+      resolvedMetadata ? JSON.stringify(resolvedMetadata) : '{}'
+    ]);
+
+    // Mark ticket executed
+    await query(`
+      UPDATE update_tickets
+      SET status = 'EXECUTED',
+          payload = $1,
+          target_resource_id = $2,
+          verified_at = NOW(),
+          executed_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $3;
+    `, [JSON.stringify({ ...ticket.payload, parentId: resolvedParentId, adminLevelId: resolvedAdminLevelId, name: resolvedName, code: cleanCode, jurisdictionArea: resolvedArea }), newOrg.rows[0].id, ticket.id]);
 
     await query(`
       INSERT INTO audit_logs (
@@ -1077,14 +1174,14 @@ async function handleCreateNode(req: Request, res: Response) {
         action, resource_type, resource_id, result, ip_address, user_agent, metadata, after_value
       )
       VALUES ($1, $1, $2, $2, $3, 'NODE_CREATED', 'ORG', $4, 'ALLOW', $5, $6, $7::jsonb, $7::jsonb);
-    `, [user.userId, newOrg.rows[0].id, parent.body_id, newOrg.rows[0].id, req.ip, req.headers['user-agent'], JSON.stringify({ name, code: cleanCode })]);
+    `, [user.userId, newOrg.rows[0].id, targetBodyId, newOrg.rows[0].id, req.ip, req.headers['user-agent'], JSON.stringify({ name: resolvedName, code: cleanCode, ticketNumber: ticket.ticket_number })]);
 
-    return res.status(201).json({ success: true, organization: newOrg.rows[0] });
+    return res.status(201).json({ success: true, organization: newOrg.rows[0], ticketNumber: ticket.ticket_number });
   } catch (err: any) {
     if (err.code === '23505') {
       return res.status(409).json({ error: 'Conflict', message: 'Organization code already exists' });
     }
-    return res.status(500).json({ error: 'Server Error', message: 'Failed to create organization' });
+    return res.status(500).json({ error: 'Server Error', message: 'Failed to create organization: ' + err.message });
   }
 }
 

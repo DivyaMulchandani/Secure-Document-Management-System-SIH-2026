@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { api } from '../lib/api';
+import { api, setAuthToken } from '../lib/api';
 
 export interface UserProfile {
   userId: string;
@@ -49,9 +49,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUser(res.user);
       } else {
         setUser(null);
+        setAuthToken(null);
       }
     } catch {
       setUser(null);
+      setAuthToken(null);
     } finally {
       setLoading(false);
     }
@@ -77,8 +79,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const verifyOtp = async (identifier: string, otp: string) => {
     try {
-      const res = await api.post<{ success: boolean; user: UserProfile }>('/auth/verify-otp', { identifier, otp });
+      const res = await api.post<{ success: boolean; user: UserProfile; token?: string }>('/auth/verify-otp', { identifier, otp });
       if (res.success && res.user) {
+        if (res.token) setAuthToken(res.token);
         setUser(res.user);
         return { success: true };
       }
@@ -90,8 +93,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = async (username: string, password: string) => {
     try {
-      const res = await api.post<{ success: boolean; user: UserProfile }>('/auth/login', { username, password });
+      const res = await api.post<{ success: boolean; user: UserProfile; token?: string }>('/auth/login', { username, password });
       if (res.success && res.user) {
+        if (res.token) setAuthToken(res.token);
         setUser(res.user);
         return { success: true };
       }
@@ -105,6 +109,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       await api.post('/auth/logout');
     } catch {}
+    setAuthToken(null);
     setUser(null);
   };
 

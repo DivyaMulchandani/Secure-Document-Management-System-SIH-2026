@@ -78,8 +78,8 @@ router.get('/:id', requireAuth, async (req: Request, res: Response) => {
   return res.json({ ticket });
 });
 
-// POST /api/tickets/request-otp - Step 1: Initiate ticket & send OTP
-router.post('/request-otp', requireAuth, async (req: Request, res: Response) => {
+// POST /api/tickets/request-otp & /api/tickets/generate-otp - Step 1: Initiate ticket & send OTP
+async function handleRequestOtp(req: Request, res: Response) {
   try {
     const user = req.userSession!;
     const { actionType, targetResourceType, targetResourceId, justification, payload } = req.body;
@@ -178,7 +178,7 @@ router.post('/request-otp', requireAuth, async (req: Request, res: Response) => 
   const mailResult = await sendOtpEmail(user.email, otpCode, 'UPDATE_TICKET_AUTHORIZATION', {
     displayName: user.displayName,
     ticketNumber: ticket.ticket_number,
-    actionType: ticket.action_type,
+    actionType,
     ipAddress: req.ip,
   });
 
@@ -187,6 +187,7 @@ router.post('/request-otp', requireAuth, async (req: Request, res: Response) => 
     ticketId: ticket.id,
     ticketNumber: ticket.ticket_number,
     actionType: ticket.action_type,
+    status: ticket.status,
     requesterEmail: maskEmail(user.email),
     message: mailResult.mode === 'LIVE_SMTP'
       ? `Mandatory update ticket ${ticket.ticket_number} generated. Authorization code dispatched to ${maskEmail(user.email)} via secure SMTP relay.`
@@ -198,7 +199,10 @@ router.post('/request-otp', requireAuth, async (req: Request, res: Response) => 
     console.error('Failed to generate update ticket:', err);
     return res.status(500).json({ error: 'Ticket Generation Failed', message: err.message });
   }
-});
+}
+
+router.post('/request-otp', requireAuth, handleRequestOtp);
+router.post('/generate-otp', requireAuth, handleRequestOtp);
 
 // POST /api/tickets/execute-with-otp - Step 2: Verify OTP & Execute Action
 router.post('/execute-with-otp', requireAuth, async (req: Request, res: Response) => {
@@ -242,30 +246,108 @@ router.post('/execute-with-otp', requireAuth, async (req: Request, res: Response
   }
 
   let executionResult: any = null;
-  const payload = ticket.payload || {};
+  const payload = req.body.payload ? { ...(ticket.payload || {}), ...req.body.payload } : (ticket.payload || {});
 
   try {
     switch (ticket.action_type) {
       case 'CREATE_OFFICE': {
-        const { parentId, typeId, name, code, jurisdictionArea, metadata } = payload;
-        const parentRes = await query(`
-          SELECT id, hierarchy_path, level, agency_branch, body_id FROM organization_nodes WHERE id = $1;
-        `, [parentId]);
-        if (parentRes.rows.length === 0) throw new Error('Parent office node not found');
-        const parent = parentRes.rows[0];
+        const { parentId, adminLevelId, typeId, name, code, jurisdictionArea, metadata } = payload;
+        if (!name || !code) {
+          throw new Error('Office Name and Code are required.');
+        }
 
-        const cleanCode = code.toUpperCase().replace(/\s+/g, '-');
-        const pathPart = cleanCode.toLowerCase().replace(/-/g, '_');
-        const hierarchyPath = `${parent.hierarchy_path}.${pathPart}`;
-        const level = parent.level + 1;
+        let adminLevel: any = null;
+        if (adminLevelId) {
+          const alRes = await query(`SELECT * FROM admin_levels WHERE id = $1;`, [adminLevelId]);
+          if (alRes.rows.length === 0) {
+            throw new Error(`Selected hierarchy layer (${adminLevelId}) not found in database.`);
+          }
+          adminLevel = alRes.rows[0];
+        }
+
+        let parent: any = null;
+        if (parentId) {
+          const parentRes = await query(`
+            SELECT id, hierarchy_path, level, agency_branch, body_id FROM organization_nodes WHERE id = $1;
+          `, [parentId]);
+          if (parentRes.rows.length === 0) throw new Error('Parent office node not found.');
+          parent = parentRes.rows[0];
+        }
+
+        const targetBodyId = adminLevel ? adminLevel.body_id : (parent ? parent.body_id : (ticket.body_id || user.agencyBranch));
+
+        // Enforce Sovereign Agency Boundary on Parent
+        if (parent && parent.body_id !== targetBodyId) {
+          throw new Error(`Institutional Boundary Violation: Cannot establish a ${targetBodyId} office under a ${parent.body_id} parent office.`);
+        }
+
+        const resolvedLevel = adminLevel ? adminLevel.level_number : (parent ? parent.level + 1 : 1);
+
+        // Enforce Hierarchy Ordering (Prevent Level Inversion)
+        if (parent && parent.level >= resolvedLevel) {
+          throw new Error(`Inverted Hierarchy Violation: Parent office level (${parent.level}) must be strictly lower than child layer level (${resolvedLevel}).`);
+        }
+
+        if (!parent && resolvedLevel > 1) {
+          throw new Error(`Parent office node is required for Level ${resolvedLevel} offices.`);
+        }
+
+        // Enforce Creator Authority
+        if (!isMaster) {
+          if (user.agencyBranch !== targetBodyId) {
+            throw new Error(`Institutional Boundary Violation: Cannot create offices in agency '${targetBodyId}' from '${user.agencyBranch}'.`);
+          }
+
+          // Check if creator's mapped level permits creating sub-offices
+          const creatorLevelRes = await query(`
+            SELECT al.can_create_sub_offices
+            FROM users u
+            JOIN organization_nodes o ON u.primary_organization_id = o.id
+            LEFT JOIN admin_levels al ON o.admin_level_id = al.id
+            WHERE u.id = $1;
+          `, [user.userId]);
+
+          if (creatorLevelRes.rows.length > 0 && creatorLevelRes.rows[0].can_create_sub_offices === false) {
+            throw new Error('Authority Denied: Your assigned administrative layer does not have permission to commission subordinate offices.');
+          }
+
+          // Sibling Isolation
+          if (parent) {
+            const isWithinSubtree = parent.hierarchy_path === user.organizationPath ||
+              parent.hierarchy_path.startsWith(user.organizationPath + '.');
+            if (!isWithinSubtree) {
+              throw new Error('Sibling Isolation: You cannot create child office nodes outside your descendant command subtree.');
+            }
+          }
+        }
+
+        const cleanCode = code.toUpperCase().replace(/[^A-Z0-9_-]/g, '-').replace(/-+/g, '-');
+        const pathPart = cleanCode.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+        const hierarchyPath = parent ? `${parent.hierarchy_path}.${pathPart}` : `${targetBodyId}.${pathPart}`;
+        const resolvedTypeId = adminLevel?.office_type_id || typeId || 'OFFICE';
+        const assignedAdminLevelId = adminLevel ? adminLevel.id : null;
 
         const insOrg = await query(`
           INSERT INTO organization_nodes (
-            parent_id, body_id, agency_branch, type_id, node_type_id, name, code, hierarchy_path, level, jurisdiction_area, metadata
+            parent_id, body_id, agency_branch, type_id, node_type_id, admin_level_id,
+            name, code, hierarchy_path, level, jurisdiction_area, metadata
           )
-          VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10)
+          VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, $9, $10, $11)
           RETURNING *;
-        `, [parentId, parent.body_id, parent.agency_branch, typeId, name, cleanCode, hierarchyPath, level, jurisdictionArea || '', metadata ? JSON.stringify(metadata) : '{}']);
+        `, [
+          parent ? parent.id : null,
+          targetBodyId,
+          targetBodyId,
+          resolvedTypeId,
+          assignedAdminLevelId,
+          name.trim(),
+          cleanCode,
+          hierarchyPath,
+          resolvedLevel,
+          jurisdictionArea ? jurisdictionArea.trim() : '',
+          metadata ? JSON.stringify(metadata) : '{}'
+        ]);
+
         executionResult = insOrg.rows[0];
         break;
       }
@@ -429,14 +511,17 @@ router.post('/execute-with-otp', requireAuth, async (req: Request, res: Response
         throw new Error(`Unsupported action type: ${ticket.action_type}`);
     }
 
+    const effectiveTargetId = executionResult?.id || ticket.target_resource_id;
     await query(`
       UPDATE update_tickets
       SET status = 'EXECUTED',
+          payload = $1,
+          target_resource_id = COALESCE($2, target_resource_id),
           verified_at = NOW(),
           executed_at = NOW(),
           updated_at = NOW()
-      WHERE id = $1;
-    `, [ticket.id]);
+      WHERE id = $3;
+    `, [JSON.stringify(payload), effectiveTargetId, ticket.id]);
 
     const auditMeta = JSON.stringify({
       ticketNumber: ticket.ticket_number,

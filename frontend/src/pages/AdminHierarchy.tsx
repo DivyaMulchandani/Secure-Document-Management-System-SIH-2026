@@ -5,7 +5,7 @@ import { AgencyBadge } from '../components/ClassificationBadge';
 import {
   BuildingIcon, ShieldIcon, PlusIcon,
   SearchIcon, AlertTriangle as AlertTriangleIcon, CheckIcon, ActivityIcon,
-  EyeIcon, ClockIcon, UsersIcon, LockIcon, RefreshIcon
+  EyeIcon, ClockIcon, UsersIcon, LockIcon, RefreshIcon, ChevronRightIcon
 } from '../components/Icons';
 import { CompulsoryTicketModal, TicketSummaryItem } from '../components/CompulsoryTicketModal';
 import { AdminAnalyticsDashboard } from '../components/admin/AdminAnalyticsDashboard';
@@ -24,7 +24,9 @@ interface AdminLevel {
   mapped_office_count?: number;
   admin_count?: number;
   office_type_id?: string;
+  office_type_name?: string;
   default_role_id?: string;
+  default_role_name?: string;
   manages_office_users?: boolean;
   manages_subordinate_admins?: boolean;
   can_create_sub_offices?: boolean;
@@ -262,6 +264,161 @@ export const AdminHierarchy: React.FC = () => {
 
   // Tag Assignment to Office Modal
   const [tagAssignmentOffice, setTagAssignmentOffice] = useState<OfficeNode | null>(null);
+
+  // Modal: Ticket-First Establish Office Node
+  const [showEstablishOfficeModal, setShowEstablishOfficeModal] = useState(false);
+  const [officeModalStage, setOfficeModalStage] = useState<'JUSTIFICATION' | 'ACTIVE_TICKET' | 'COMPLETED'>('JUSTIFICATION');
+  const [establishForm, setEstablishForm] = useState({
+    bodyId: 'POLICE' as 'POLICE' | 'JUDICIARY' | 'FORENSICS',
+    adminLevelId: '',
+    justification: '',
+    parentId: '',
+    name: '',
+    code: '',
+    jurisdictionArea: '',
+    otp: '',
+  });
+  const [generatedTicket, setGeneratedTicket] = useState<{
+    id: string;
+    ticketNumber: string;
+    devOtpPreview?: string;
+    message?: string;
+  } | null>(null);
+  const [modalSubmitting, setModalSubmitting] = useState(false);
+  const [modalError, setModalError] = useState('');
+  const [modalSuccess, setModalSuccess] = useState('');
+
+  const handleOpenEstablishOfficeModal = (initialBody?: 'POLICE' | 'JUDICIARY' | 'FORENSICS') => {
+    const targetBody = initialBody || (officeFilterBody !== 'ALL' && ['POLICE', 'JUDICIARY', 'FORENSICS'].includes(officeFilterBody) ? officeFilterBody as 'POLICE' | 'JUDICIARY' | 'FORENSICS' : 'POLICE');
+    const availableLayers = adminLevels.filter(al => al.body_id === targetBody);
+    const initialLayer = availableLayers[0]?.id || '';
+    const initialParent = offices.filter(o => o.body_id === targetBody && (availableLayers[0]?.level_number ? o.level < availableLayers[0].level_number : true))[0]?.id || '';
+    
+    setEstablishForm({
+      bodyId: targetBody,
+      adminLevelId: initialLayer,
+      justification: '',
+      parentId: initialParent,
+      name: '',
+      code: '',
+      jurisdictionArea: '',
+      otp: '',
+    });
+    setOfficeModalStage('JUSTIFICATION');
+    setGeneratedTicket(null);
+    setModalError('');
+    setModalSuccess('');
+    setShowEstablishOfficeModal(true);
+  };
+
+  const handleGenerateOfficeTicket = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setModalError('');
+    if (!establishForm.adminLevelId) {
+      setModalError('Please select a defined governance layer.');
+      return;
+    }
+    if (!establishForm.justification || establishForm.justification.trim().length < 10) {
+      setModalError('Operational justification must be at least 10 characters.');
+      return;
+    }
+
+    setModalSubmitting(true);
+    try {
+      const res = await api.post<{
+        success: boolean;
+        ticketId: string;
+        ticketNumber: string;
+        devOtpPreview?: string;
+        message?: string;
+      }>('/tickets/request-otp', {
+        actionType: 'CREATE_OFFICE',
+        targetResourceType: 'ORGANIZATION_NODE',
+        justification: establishForm.justification.trim(),
+        payload: {
+          adminLevelId: establishForm.adminLevelId,
+          bodyId: establishForm.bodyId,
+        }
+      });
+
+      if (res.success) {
+        setGeneratedTicket({
+          id: res.ticketId,
+          ticketNumber: res.ticketNumber,
+          devOtpPreview: res.devOtpPreview,
+          message: res.message,
+        });
+        if (res.devOtpPreview) {
+          setEstablishForm(prev => ({ ...prev, otp: res.devOtpPreview || '' }));
+        }
+        setOfficeModalStage('ACTIVE_TICKET');
+      } else {
+        setModalError('Failed to generate compulsory update ticket.');
+      }
+    } catch (err: any) {
+      setModalError(err.message || 'Ticket generation failed');
+    } finally {
+      setModalSubmitting(false);
+    }
+  };
+
+  const handleExecuteEstablishOffice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setModalError('');
+    if (!generatedTicket) {
+      setModalError('No active ticket found. Please initiate ticket first.');
+      return;
+    }
+    if (!establishForm.name.trim() || !establishForm.code.trim()) {
+      setModalError('Office Name and Official Identifier Code are required.');
+      return;
+    }
+    if (!establishForm.otp.trim()) {
+      setModalError('Enter the 6-digit authorization OTP.');
+      return;
+    }
+
+    const selectedLayer = adminLevels.find(al => al.id === establishForm.adminLevelId);
+    if (selectedLayer && selectedLayer.level_number > 1 && !establishForm.parentId) {
+      setModalError(`Parent office node is required for Level ${selectedLayer.level_number} offices.`);
+      return;
+    }
+
+    setModalSubmitting(true);
+    try {
+      const res = await api.post<{
+        success: boolean;
+        ticketNumber: string;
+        result: any;
+      }>('/tickets/execute-with-otp', {
+        ticketId: generatedTicket.id,
+        otp: establishForm.otp.trim(),
+        payload: {
+          parentId: selectedLayer && selectedLayer.level_number > 1 ? establishForm.parentId : null,
+          adminLevelId: establishForm.adminLevelId,
+          name: establishForm.name.trim(),
+          code: establishForm.code.trim().toUpperCase(),
+          jurisdictionArea: establishForm.jurisdictionArea.trim(),
+        }
+      });
+
+      if (res.success) {
+        setModalSuccess(`Office node '${establishForm.name}' established successfully under Ticket ${res.ticketNumber}!`);
+        setOfficeModalStage('COMPLETED');
+        await fetchOffices();
+        await fetchAdminLevels();
+        setTimeout(() => {
+          setShowEstablishOfficeModal(false);
+        }, 1200);
+      } else {
+        setModalError('Failed to execute office establishment.');
+      }
+    } catch (err: any) {
+      setModalError(err.message || 'Office establishment failed');
+    } finally {
+      setModalSubmitting(false);
+    }
+  };
 
   // Compulsory Ticket State
   const [ticketModalConfig, setTicketModalConfig] = useState<{
@@ -724,6 +881,15 @@ export const AdminHierarchy: React.FC = () => {
                 title="Refresh mapping matrix"
               >
                 Refresh
+              </button>
+
+              <button
+                onClick={() => handleOpenEstablishOfficeModal()}
+                className="px-3 py-1 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white font-mono transition-colors font-bold shadow-xs flex items-center gap-1.5"
+                title="Establish new office node under an authorized compulsory update ticket"
+              >
+                <PlusIcon className="w-3.5 h-3.5" />
+                <span>Establish Office Node (Ticket Gateway)</span>
               </button>
             </div>
           </div>
@@ -2088,6 +2254,401 @@ export const AdminHierarchy: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* ========================================================================================= */}
+      {/* TICKET-FIRST ESTABLISH OFFICE NODE MODAL (DYNAMIC LAYER-DRIVEN PROTOCOL)                   */}
+      {/* ========================================================================================= */}
+      {showEstablishOfficeModal && (() => {
+        const availableLayers = adminLevels.filter(al => al.body_id === establishForm.bodyId);
+        const selectedLayer = availableLayers.find(al => al.id === establishForm.adminLevelId) || availableLayers[0];
+        const validParents = offices.filter(o => o.body_id === establishForm.bodyId && (selectedLayer?.level_number ? o.level < selectedLayer.level_number : true));
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 backdrop-blur-xs">
+            <div className="bg-white rounded-xl border border-slate-300 shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[92vh]">
+              {/* Header */}
+              <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-blue-600/30 border border-blue-500/40 flex items-center justify-center text-blue-300">
+                    <BuildingIcon className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold font-mono tracking-wide uppercase flex items-center gap-2">
+                      <span>Establish Office Node</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-blue-800 text-blue-200 border border-blue-600">
+                        COMPULSORY TICKET GATEWAY
+                      </span>
+                    </h3>
+                    <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                      State of Gujarat • Sovereign Hierarchy & Institutional Layer Inheritance
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowEstablishOfficeModal(false)}
+                  className="w-7 h-7 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center font-bold text-sm cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Progress Stepper Banner */}
+              <div className="bg-slate-100 border-b border-slate-200 px-5 py-2.5 flex items-center justify-between text-xs font-mono">
+                <div className="flex items-center gap-2">
+                  <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                    officeModalStage === 'JUSTIFICATION' ? 'bg-blue-700 text-white' : 'bg-emerald-600 text-white'
+                  }`}>
+                    {officeModalStage === 'JUSTIFICATION' ? '1' : '✓'}
+                  </span>
+                  <span className={officeModalStage === 'JUSTIFICATION' ? 'font-bold text-slate-900' : 'text-slate-600'}>
+                    1. Generate Update Ticket & Layer
+                  </span>
+                </div>
+                <ChevronRightIcon className="w-3.5 h-3.5 text-slate-400" />
+                <div className="flex items-center gap-2">
+                  <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                    officeModalStage === 'ACTIVE_TICKET' ? 'bg-blue-700 text-white' : officeModalStage === 'COMPLETED' ? 'bg-emerald-600 text-white' : 'bg-slate-300 text-slate-600'
+                  }`}>
+                    {officeModalStage === 'COMPLETED' ? '✓' : '2'}
+                  </span>
+                  <span className={officeModalStage === 'ACTIVE_TICKET' ? 'font-bold text-slate-900' : 'text-slate-600'}>
+                    2. Add Office Details & Verify OTP
+                  </span>
+                </div>
+              </div>
+
+              {/* Modal Body */}
+              <div className="p-5 overflow-y-auto flex-1 space-y-4 text-xs">
+                {modalError && (
+                  <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 font-mono flex items-center gap-2">
+                    <span>⚠️</span>
+                    <span>{modalError}</span>
+                  </div>
+                )}
+
+                {modalSuccess && (
+                  <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 font-mono flex items-center gap-2">
+                    <span>✅</span>
+                    <span>{modalSuccess}</span>
+                  </div>
+                )}
+
+                {/* STAGE 1: TICKET GENERATION & LAYER SELECTION */}
+                {officeModalStage === 'JUSTIFICATION' && (
+                  <form onSubmit={handleGenerateOfficeTicket} className="space-y-4">
+                    <div className="p-3 rounded bg-blue-50 border border-blue-200 text-blue-900 font-mono text-[11.5px] leading-relaxed">
+                      <strong>COMPULSORY LEA REGULATORY PROTOCOL:</strong> Establishing an office node creates sovereign legal jurisdiction. Under state audit protocol, you must select the designated governance layer and submit a mandatory justification to generate an authorized update ticket before office details can be configured.
+                    </div>
+
+                    {/* Sovereign Body Selector */}
+                    <div>
+                      <label className="block text-slate-700 font-bold font-mono mb-1.5 uppercase text-[11px]">
+                        1. Sovereign Institutional Body *
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        {[
+                          { id: 'POLICE', name: 'Gujarat Police', icon: '👮' },
+                          { id: 'JUDICIARY', name: 'State Judiciary', icon: '⚖️' },
+                          { id: 'FORENSICS', name: 'Forensics (DFSS)', icon: '🔬' },
+                        ].map(b => (
+                          <button
+                            key={b.id}
+                            type="button"
+                            onClick={() => {
+                              const newLayers = adminLevels.filter(al => al.body_id === b.id);
+                              setEstablishForm({
+                                ...establishForm,
+                                bodyId: b.id as any,
+                                adminLevelId: newLayers[0]?.id || '',
+                                parentId: offices.filter(o => o.body_id === b.id)[0]?.id || '',
+                              });
+                            }}
+                            className={`p-2.5 rounded-lg border text-left font-mono transition-all cursor-pointer ${
+                              establishForm.bodyId === b.id
+                                ? 'bg-blue-50 border-blue-600 ring-2 ring-blue-600/20 text-blue-900 font-bold'
+                                : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
+                            }`}
+                          >
+                            <div className="text-base">{b.icon}</div>
+                            <div className="text-xs font-bold mt-1">{b.name}</div>
+                            <div className="text-[10px] text-slate-500">{b.id} TREE</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Dynamic Governance Layer Selector */}
+                    <div>
+                      <label className="block text-slate-700 font-bold font-mono mb-1.5 uppercase text-[11px]">
+                        2. Select Configured Governance Layer (Admin Level) *
+                      </label>
+                      {availableLayers.length === 0 ? (
+                        <div className="p-4 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 font-mono">
+                          No administrative layers defined for {establishForm.bodyId}. Please go to the <strong>LEVELS</strong> tab to define a layer first.
+                        </div>
+                      ) : (
+                        <select
+                          required
+                          value={establishForm.adminLevelId}
+                          onChange={e => {
+                            const newLayer = adminLevels.find(al => al.id === e.target.value);
+                            const validP = offices.filter(o => o.body_id === establishForm.bodyId && (newLayer?.level_number ? o.level < newLayer.level_number : true));
+                            setEstablishForm({
+                              ...establishForm,
+                              adminLevelId: e.target.value,
+                              parentId: validP[0]?.id || '',
+                            });
+                          }}
+                          className="w-full p-2.5 rounded bg-slate-50 border border-slate-300 font-mono text-slate-900 focus:border-blue-600 focus:outline-hidden"
+                        >
+                          {availableLayers.map(al => (
+                            <option key={al.id} value={al.id}>
+                              Level {al.level_number}: {al.name} (Type: {al.office_type_name || al.office_type_id} • Admin: {al.default_role_name || al.default_role_id})
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+
+                    {/* Layer Preview Info Card */}
+                    {selectedLayer && (
+                      <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
+                        <div className="text-[11px] font-bold font-mono text-slate-800 uppercase flex items-center justify-between">
+                          <span>Layer Decision-Making Profile: {selectedLayer.name}</span>
+                          <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px]">
+                            Tier {selectedLayer.level_number}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] font-mono">
+                          <div className="p-2 bg-white rounded border border-slate-200">
+                            <span className="text-slate-400 block text-[9px] uppercase">Hierarchy Level</span>
+                            <span className="font-bold text-slate-800">Level {selectedLayer.level_number}</span>
+                          </div>
+                          <div className="p-2 bg-white rounded border border-slate-200">
+                            <span className="text-slate-400 block text-[9px] uppercase">Office Type</span>
+                            <span className="font-bold text-blue-700 truncate block">{selectedLayer.office_type_name || selectedLayer.office_type_id}</span>
+                          </div>
+                          <div className="p-2 bg-white rounded border border-slate-200">
+                            <span className="text-slate-400 block text-[9px] uppercase">Managing Role</span>
+                            <span className="font-bold text-slate-800 truncate block">{selectedLayer.default_role_name || selectedLayer.default_role_id}</span>
+                          </div>
+                          <div className="p-2 bg-white rounded border border-slate-200">
+                            <span className="text-slate-400 block text-[9px] uppercase">Max Clearance</span>
+                            <span className="font-bold text-emerald-700">{selectedLayer.max_clearance_allowed || 'CONFIDENTIAL'}</span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 flex-wrap pt-1 text-[10px] font-mono text-slate-600">
+                          {selectedLayer.can_create_sub_offices && <span className="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">✓ Can Create Sub-Offices</span>}
+                          {selectedLayer.manages_office_users && <span className="px-1.5 py-0.5 rounded bg-blue-50 text-blue-800 border border-blue-200">✓ Manages Office Users</span>}
+                          {selectedLayer.manages_subordinate_admins && <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-800 border border-purple-200">✓ Sub-Admins Under Here</span>}
+                          {selectedLayer.can_approve_tickets && <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200">✓ Approves Tickets</span>}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Compulsory Operational Justification */}
+                    <div>
+                      <label className="block text-slate-700 font-bold font-mono mb-1.5 uppercase text-[11px]">
+                        3. Compulsory Operational Justification (For Update Ticket) *
+                      </label>
+                      <textarea
+                        required
+                        rows={3}
+                        value={establishForm.justification}
+                        onChange={e => setEstablishForm({ ...establishForm, justification: e.target.value })}
+                        placeholder="State official government gazette, sanction order, or administrative requirement for establishing this office node..."
+                        className="w-full p-2.5 rounded bg-slate-50 border border-slate-300 font-mono text-slate-900 focus:border-blue-600 focus:outline-hidden text-xs"
+                      />
+                      <p className="text-[10.5px] text-slate-500 font-mono mt-1">
+                        Minimum 10 characters. Recorded immutably in state cryptographic ledger.
+                      </p>
+                    </div>
+
+                    {/* Step 1 Actions */}
+                    <div className="pt-3 border-t border-slate-200 flex items-center justify-between">
+                      <button
+                        type="button"
+                        onClick={() => setShowEstablishOfficeModal(false)}
+                        className="px-4 py-2 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono font-medium"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={modalSubmitting || availableLayers.length === 0}
+                        className="px-5 py-2.5 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white font-mono font-bold shadow-sm flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                      >
+                        <LockIcon className="w-4 h-4" />
+                        <span>{modalSubmitting ? 'Generating Ticket & OTP...' : 'Generate Compulsory Update Ticket & OTP →'}</span>
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {/* STAGE 2: ACTIVE TICKET • OFFICE DETAILS SPECIFICATION */}
+                {officeModalStage === 'ACTIVE_TICKET' && generatedTicket && (
+                  <form onSubmit={handleExecuteEstablishOffice} className="space-y-4">
+                    {/* Active Ticket Banner */}
+                    <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 space-y-1.5 font-mono">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                          <span className="font-bold text-blue-900 text-xs tracking-wider">
+                            ACTIVE TICKET: {generatedTicket.ticketNumber}
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-200 text-blue-900">
+                          STATUS: PENDING OTP
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-blue-800">
+                        Governing Layer: <strong>Level {selectedLayer?.level_number} ({selectedLayer?.name})</strong> • Agency: <strong>{establishForm.bodyId}</strong>
+                      </div>
+                      {generatedTicket.devOtpPreview && (
+                        <div className="mt-2 p-2 rounded bg-white border border-blue-300 flex items-center justify-between text-xs">
+                          <span className="text-slate-600 text-[11px]">LEA Test Verification Code:</span>
+                          <span className="font-bold text-blue-900 font-mono text-sm tracking-widest">{generatedTicket.devOtpPreview}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Parent Office Selection */}
+                    <div>
+                      <label className="block text-slate-700 font-bold font-mono mb-1 uppercase text-[11px]">
+                        Parent Command Office Node *
+                      </label>
+                      {selectedLayer && selectedLayer.level_number === 1 ? (
+                        <div className="p-2.5 rounded bg-slate-100 border border-slate-200 font-mono text-xs text-slate-600">
+                          None (This is a Sovereign Apex Root Command Node)
+                        </div>
+                      ) : (
+                        <select
+                          required
+                          value={establishForm.parentId}
+                          onChange={e => setEstablishForm({ ...establishForm, parentId: e.target.value })}
+                          className="w-full p-2.5 rounded bg-slate-50 border border-slate-300 font-mono text-slate-900 focus:border-blue-600 focus:outline-hidden"
+                        >
+                          <option value="">-- Select Parent Office (Must be Higher Level) --</option>
+                          {validParents.map(po => (
+                            <option key={po.id} value={po.id}>
+                              Level {po.level} • {po.name} ({po.code})
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <p className="text-[10.5px] text-slate-500 font-mono mt-1">
+                        Parent offices are strictly restricted to the same sovereign body ({establishForm.bodyId}) with level strictly lower than Level {selectedLayer?.level_number}.
+                      </p>
+                    </div>
+
+                    {/* Office Node Name & Code */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-slate-700 font-bold font-mono mb-1 uppercase text-[11px]">
+                          Office Node Name *
+                        </label>
+                        <input
+                          required
+                          type="text"
+                          value={establishForm.name}
+                          onChange={e => {
+                            const newName = e.target.value;
+                            const suggestedCode = establishForm.code || `GUJ-${establishForm.bodyId.slice(0,3)}-${newName.toUpperCase().replace(/[^A-Z0-9]/g, '-').slice(0, 15)}`;
+                            setEstablishForm({ ...establishForm, name: newName, code: suggestedCode });
+                          }}
+                          placeholder="e.g. Satellite Division Command Office"
+                          className="w-full p-2.5 rounded bg-slate-50 border border-slate-300 font-mono text-slate-900 focus:border-blue-600 focus:outline-hidden text-xs"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-slate-700 font-bold font-mono mb-1 uppercase text-[11px]">
+                          Official Identifier Code *
+                        </label>
+                        <input
+                          required
+                          type="text"
+                          value={establishForm.code}
+                          onChange={e => setEstablishForm({ ...establishForm, code: e.target.value.toUpperCase() })}
+                          placeholder="e.g. GUJ-POL-AMD-SATELLITE"
+                          className="w-full p-2.5 rounded bg-slate-50 border border-slate-300 font-mono text-slate-900 uppercase focus:border-blue-600 focus:outline-hidden text-xs"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Jurisdiction Area */}
+                    <div>
+                      <label className="block text-slate-700 font-bold font-mono mb-1 uppercase text-[11px]">
+                        Jurisdiction Area Envelope
+                      </label>
+                      <input
+                        type="text"
+                        value={establishForm.jurisdictionArea}
+                        onChange={e => setEstablishForm({ ...establishForm, jurisdictionArea: e.target.value })}
+                        placeholder="e.g. Satellite, Jodhpur, and Bopal Corridor (Ahmedabad West)"
+                        className="w-full p-2.5 rounded bg-slate-50 border border-slate-300 font-mono text-slate-900 focus:border-blue-600 focus:outline-hidden text-xs"
+                      />
+                    </div>
+
+                    {/* Authorization OTP Code */}
+                    <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                      <label className="block text-slate-800 font-bold font-mono mb-1.5 uppercase text-[11px]">
+                        Enter 6-Digit Authorization Code (OTP) *
+                      </label>
+                      <input
+                        required
+                        type="text"
+                        maxLength={6}
+                        value={establishForm.otp}
+                        onChange={e => setEstablishForm({ ...establishForm, otp: e.target.value })}
+                        placeholder="••••••"
+                        className="w-full p-2 text-center tracking-[0.3em] font-bold text-lg font-mono rounded bg-white border border-slate-300 focus:border-blue-600 focus:outline-hidden text-slate-900"
+                      />
+                      <p className="text-[10.5px] text-slate-500 font-mono mt-1 text-center">
+                        Dispatched to registered official identity for ticket execution.
+                      </p>
+                    </div>
+
+                    {/* Actions */}
+                    <div className="pt-3 border-t border-slate-200 flex items-center justify-between">
+                      <button
+                        type="button"
+                        onClick={() => setOfficeModalStage('JUSTIFICATION')}
+                        className="px-4 py-2 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-mono font-medium"
+                      >
+                        ← Back / Re-initiate
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={modalSubmitting}
+                        className="px-5 py-2.5 rounded bg-[#1D4ED8] hover:bg-[#1E40AF] text-white font-mono font-bold shadow-sm flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+                      >
+                        <LockIcon className="w-4 h-4" />
+                        <span>{modalSubmitting ? 'Executing Ticket...' : 'Verify OTP & Establish Office Node'}</span>
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {/* STAGE 3: COMPLETED */}
+                {officeModalStage === 'COMPLETED' && (
+                  <div className="p-8 text-center space-y-3 font-mono">
+                    <div className="w-12 h-12 mx-auto rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-xl font-bold">
+                      ✓
+                    </div>
+                    <h4 className="text-base font-bold text-slate-900 uppercase">
+                      Office Node Established Successfully
+                    </h4>
+                    <p className="text-xs text-slate-600">
+                      The office has been established, linked to layer <strong>{selectedLayer?.name}</strong>, and permanently recorded in the state cryptographic ledger.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Reusable Compulsory Ticket Modal */}
       <CompulsoryTicketModal
