@@ -56,8 +56,10 @@ export async function authenticateCredentials(username: string, plainPassword: s
     FROM users u
     JOIN roles r ON u.primary_role_id = r.id
     JOIN organization_nodes o ON u.primary_organization_id = o.id
-    WHERE LOWER(u.username) = LOWER($1);
-  `, [username]);
+    WHERE LOWER(u.username) = LOWER($1)
+       OR LOWER(u.email) = LOWER($1)
+       OR LOWER(COALESCE(u.government_id, '')) = LOWER($1);
+  `, [username.trim()]);
 
   if (userRes.rows.length === 0) {
     // Record login failure audit

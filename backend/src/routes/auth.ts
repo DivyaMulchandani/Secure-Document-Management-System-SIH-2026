@@ -101,7 +101,8 @@ router.post('/verify-otp', async (req: Request, res: Response) => {
 router.post('/login', async (req: Request, res: Response) => {
   const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
   const ua = req.headers['user-agent'] || '';
-  const { username, password } = req.body;
+  const username = ((req.body.username || req.body.identifier || req.body.email || '') as string).trim();
+  const password = req.body.password;
 
   if (!checkRateLimit(ip)) {
     return res.status(429).json({
@@ -111,7 +112,7 @@ router.post('/login', async (req: Request, res: Response) => {
   }
 
   if (!username || !password) {
-    return res.status(400).json({ error: 'Validation Error', message: 'Username and password are required' });
+    return res.status(400).json({ error: 'Validation Error', message: 'Official identifier and password are required' });
   }
 
   try {

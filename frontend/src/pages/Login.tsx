@@ -289,7 +289,50 @@ export const Login: React.FC = () => {
             </form>
           )}
 
-          <div className="mt-5 pt-3.5 border-t border-slate-200 text-center">
+          {/* Quick Personnel Credentials Helper */}
+          <div className="mt-4 pt-3 border-t border-slate-100">
+            <div className="text-[10px] font-mono text-slate-500 font-semibold uppercase tracking-wider mb-2 flex items-center justify-between">
+              <span>Quick Demo Credentials:</span>
+              <span className="text-[9px] text-blue-700 font-normal">Click to auto-fill</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIdentifier('master.admin@gujarat.gov.in');
+                  setPassword('Gov@Secure2026!');
+                  setError('');
+                }}
+                className="text-left p-2 rounded bg-slate-50 hover:bg-blue-50 border border-slate-200 hover:border-blue-300 transition-colors"
+              >
+                <div className="text-[11px] font-bold text-slate-800 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-700 inline-block"></span>
+                  <span>Master Apex Admin</span>
+                </div>
+                <div className="text-[10px] font-mono text-slate-500 truncate">master.admin@gujarat.gov.in</div>
+                <div className="text-[9px] font-mono text-slate-400">Gov@Secure2026!</div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setIdentifier('acp.ellisbridge@gujarat.gov.in');
+                  setPassword('Gov@Secure2026!');
+                  setError('');
+                }}
+                className="text-left p-2 rounded bg-slate-50 hover:bg-blue-50 border border-slate-200 hover:border-blue-300 transition-colors"
+              >
+                <div className="text-[11px] font-bold text-slate-800 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 inline-block"></span>
+                  <span>ACP Ellisbridge</span>
+                </div>
+                <div className="text-[10px] font-mono text-slate-500 truncate">acp.ellisbridge@gujarat.gov.in</div>
+                <div className="text-[9px] font-mono text-slate-400">Gov@Secure2026!</div>
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-slate-200 text-center">
             <div className="text-[11px] font-mono text-slate-500">
               Official government portal. All authentication events are cryptographically recorded in the state audit ledger.
             </div>
